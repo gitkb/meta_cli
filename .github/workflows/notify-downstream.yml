@@ -8,6 +8,8 @@ on:
 
 jobs:
   wait-for-ci:
+    # Only wait when triggered by our own push (not a forwarded dispatch)
+    if: github.event_name == 'push'
     runs-on: ubuntu-latest
     steps:
       - name: Wait for CI
@@ -19,6 +21,7 @@ jobs:
           wait-interval: 10
 
   notify:
+    if: always() && (needs.wait-for-ci.result == 'success' || needs.wait-for-ci.result == 'skipped')
     needs: wait-for-ci
     runs-on: ubuntu-latest
     strategy:
@@ -30,51 +33,15 @@ jobs:
           - meta_rust_cli
           - meta_mcp
     steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Determine source
-        id: source
-        run: |
-          if [ "${{ github.event_name }}" = "repository_dispatch" ]; then
-            echo "repo=${{ github.event.client_payload.repo }}" >> $GITHUB_OUTPUT
-            echo "repo_name=${{ github.event.client_payload.repo_name }}" >> $GITHUB_OUTPUT
-            echo "sha=${{ github.event.client_payload.sha }}" >> $GITHUB_OUTPUT
-            echo "short_sha=${{ github.event.client_payload.short_sha }}" >> $GITHUB_OUTPUT
-            echo "message=${{ github.event.client_payload.message }}" >> $GITHUB_OUTPUT
-            echo "type=${{ github.event.client_payload.type }}" >> $GITHUB_OUTPUT
-            echo "actor=${{ github.event.client_payload.actor }}" >> $GITHUB_OUTPUT
-          else
-            MSG=$(git log -1 --pretty=%s)
-            echo "message=$MSG" >> $GITHUB_OUTPUT
-            echo "repo=${{ github.repository }}" >> $GITHUB_OUTPUT
-            echo "repo_name=${{ github.event.repository.name }}" >> $GITHUB_OUTPUT
-            echo "actor=${{ github.actor }}" >> $GITHUB_OUTPUT
-            echo "sha=$(git rev-parse HEAD)" >> $GITHUB_OUTPUT
-            echo "short_sha=$(git rev-parse --short HEAD)" >> $GITHUB_OUTPUT
-            if [[ "$MSG" =~ ^feat[:(] ]]; then echo "type=feat" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^fix[:(] ]]; then echo "type=fix" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^chore[:(] ]]; then echo "type=chore" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^docs[:(] ]]; then echo "type=docs" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^test[:(] ]]; then echo "type=test" >> $GITHUB_OUTPUT
-            elif [[ "$MSG" =~ ^refactor[:(] ]]; then echo "type=refactor" >> $GITHUB_OUTPUT
-            else echo "type=other" >> $GITHUB_OUTPUT
-            fi
-          fi
-
       - name: Notify ${{ matrix.downstream }}
-        uses: peter-evans/repository-dispatch@v3
+        uses: peter-evans/repository-dispatch@v4
         with:
           token: ${{ secrets.PARENT_REPO_PAT }}
           repository: harmony-labs/${{ matrix.downstream }}
           event-type: dependency-updated
           client-payload: >-
             {
-              "repo": ${{ toJSON(steps.source.outputs.repo) }},
-              "repo_name": ${{ toJSON(steps.source.outputs.repo_name) }},
-              "sha": ${{ toJSON(steps.source.outputs.sha) }},
-              "short_sha": ${{ toJSON(steps.source.outputs.short_sha) }},
-              "message": ${{ toJSON(steps.source.outputs.message) }},
-              "type": ${{ toJSON(steps.source.outputs.type) }},
-              "actor": ${{ toJSON(steps.source.outputs.actor) }}
+              "repo": ${{ toJSON(github.repository) }},
+              "sha": ${{ toJSON(github.sha) }},
+              "actor": ${{ toJSON(github.actor) }}
             }
