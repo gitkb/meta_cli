@@ -97,9 +97,10 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
 /// Recursively scan `dir` for git worktree repos, recording aliases as
 /// relative paths from `root` (the worktree task directory).
 ///
-/// A directory with a `.git` file is a worktree repo — record it and stop
-/// recursing into it. A directory without `.git` is an intermediate directory
-/// (e.g., `vendor/`) — recurse into it to find nested repos.
+/// A directory with a `.git` file is a worktree repo — record it. If the
+/// repo also has a `.meta` config (meta workspace), recurse into it to
+/// find child worktrees. A directory without `.git` is an intermediate
+/// directory (e.g., `vendor/`) — always recurse into it.
 fn discover_repos_recursive(
     root: &Path,
     dir: &Path,
@@ -129,11 +130,12 @@ fn discover_repos_recursive(
         }
 
         let sub_git = sub_path.join(".git");
-        if sub_git
+        let is_worktree = sub_git
             .symlink_metadata()
             .map(|m| m.is_file())
-            .unwrap_or(false)
-        {
+            .unwrap_or(false);
+
+        if is_worktree {
             // This is a worktree repo — use relative path from root as alias
             let source = match source_repo_from_gitfile(&sub_git) {
                 Ok(s) => s,
@@ -151,12 +153,22 @@ fn discover_repos_recursive(
             repos.push(WorktreeRepoInfo {
                 alias,
                 branch,
-                path: sub_path,
+                path: sub_path.clone(),
                 source_path: source,
                 created_branch: None,
             });
+
+            // Only recurse into worktree repos that are meta workspaces
+            // (have a .meta config). Regular repos are leaves — recursing
+            // into them would traverse node_modules/, target/, etc.
+            let has_meta = meta_core::config::find_meta_config_in(&sub_path).is_some();
+            if has_meta {
+                if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
+                    log::debug!("Skipping subtree {}: {e}", sub_path.display());
+                }
+            }
         } else {
-            // Not a repo — recurse into intermediate directory
+            // Not a repo — intermediate directory, recurse to find nested repos
             if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
                 log::debug!("Skipping subtree {}: {e}", sub_path.display());
             }
