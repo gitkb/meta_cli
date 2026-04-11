@@ -2035,8 +2035,8 @@ mod tests {
     // === M6: Simple registry tests ===
 
     #[test]
-    fn test_default_registry_points_to_harmony_labs() {
-        assert!(DEFAULT_REGISTRY.contains("harmony-labs"));
+    fn test_default_registry_points_to_gitkb() {
+        assert!(DEFAULT_REGISTRY.contains("gitkb"));
         assert!(DEFAULT_REGISTRY.contains("meta-plugins"));
     }
 
