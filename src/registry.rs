@@ -12,8 +12,7 @@ use std::io::Read;
 use std::path::{Path, PathBuf};
 
 /// Default registry URL
-pub const DEFAULT_REGISTRY: &str =
-    "https://raw.githubusercontent.com/gitkb/meta-plugins/main";
+pub const DEFAULT_REGISTRY: &str = "https://raw.githubusercontent.com/gitkb/meta-plugins/main";
 
 /// Plugin name prefix (all plugins must start with this)
 pub const PLUGIN_PREFIX: &str = "meta-";

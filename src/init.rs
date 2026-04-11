@@ -418,12 +418,7 @@ fn register_marketplace(verbose: bool) {
 
     // Register the marketplace (idempotent)
     let result = Command::new("claude")
-        .args([
-            "plugin",
-            "marketplace",
-            "add",
-            "gitkb/claude-plugins",
-        ])
+        .args(["plugin", "marketplace", "add", "gitkb/claude-plugins"])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
