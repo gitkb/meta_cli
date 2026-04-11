@@ -422,7 +422,7 @@ fn register_marketplace(verbose: bool) {
             "plugin",
             "marketplace",
             "add",
-            "harmony-labs/claude-plugins",
+            "gitkb/claude-plugins",
         ])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
