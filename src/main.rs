@@ -407,6 +407,9 @@ fn print_agent_help() {
     println!("Commands:");
     println!("  guard   Evaluate a command for destructive patterns (PreToolUse hook)");
     println!("  score   Score Claude Code sessions for agent effectiveness");
+    println!();
+    println!("Options:");
+    println!("  -h, --help   Print help");
 }
 
 fn print_context_help() {
