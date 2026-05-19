@@ -19,7 +19,14 @@ use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 const VERSION: &str = include_str!("../../VERSION");
 
 #[derive(Parser)]
-#[command(author, version = VERSION.trim(), about, long_about = None, disable_help_flag = true)]
+#[command(
+    author,
+    version = VERSION.trim(),
+    about,
+    long_about = None,
+    disable_help_flag = true,
+    disable_help_subcommand = true
+)]
 struct Cli {
     /// Print help
     #[arg(short = 'h', long, global = true, action = clap::ArgAction::SetTrue)]
@@ -128,6 +135,8 @@ enum Commands {
     Context(ContextArgs),
     /// Execute a command across all repos
     Exec(ExecArgs),
+    /// Print this message or the help of the given subcommand(s)
+    Help,
     /// Initialize meta integrations
     Init(InitArgs),
     /// Manage plugins
@@ -189,12 +198,12 @@ enum PluginCommands {
     /// Search for plugins in the registry
     Search {
         /// Search query
-        query: String,
+        query: Option<String>,
     },
     /// Install a plugin from the registry
     Install {
         /// Plugin name
-        name: String,
+        name: Option<String>,
         /// Install plugin locally to project (.meta/plugins/) instead of globally
         #[arg(long)]
         local: bool,
@@ -208,7 +217,7 @@ enum PluginCommands {
     /// Uninstall a plugin
     Uninstall {
         /// Plugin name
-        name: String,
+        name: Option<String>,
         /// Uninstall from project-local plugins
         #[arg(long)]
         local: bool,
@@ -365,6 +374,85 @@ fn write_help_with_plugin_commands(
     Ok(())
 }
 
+/// Print help for `meta context` without generating workspace context.
+fn print_context_help() {
+    println!("meta context - Show workspace context summary");
+    println!();
+    println!("Usage: meta context [OPTIONS]");
+    println!();
+    println!("Options:");
+    println!("      --no-status   Skip git status queries (structure only, faster)");
+    println!("      --no-cache    Bypass cache and force fresh context generation");
+    println!("  -h, --help        Print help");
+    println!();
+    println!("Shows the current meta workspace, repos, branches, status, key commands, and dependencies.");
+}
+
+/// Print help for the built-in plugin management command family.
+fn print_plugin_help() {
+    println!("meta plugin - Manage subprocess plugins");
+    println!();
+    println!("Usage: meta plugin <COMMAND>");
+    println!();
+    println!("Commands:");
+    println!("  search <query>        Search for plugins in the registry");
+    println!("  install <name>        Install a plugin (add --local for project-local)");
+    println!("  list                  List installed plugins (add --local for project-local only)");
+    println!("  uninstall <name>      Uninstall a plugin (add --local for project-local)");
+    println!("  update [name]         Update plugins to latest versions");
+}
+
+/// Print help for `meta plugin search` without requiring a query.
+fn print_plugin_search_help() {
+    println!("meta plugin search - Search for plugins in the registry");
+    println!();
+    println!("Usage: meta plugin search <QUERY>");
+    println!();
+    println!("Arguments:");
+    println!("  <QUERY>   Search query");
+}
+
+/// Print help for `meta plugin install` without requiring a plugin name.
+fn print_plugin_install_help() {
+    println!("meta plugin install - Install a plugin from the registry");
+    println!();
+    println!("Usage: meta plugin install <NAME> [--local]");
+    println!();
+    println!("Options:");
+    println!("      --local   Install to .meta/plugins instead of ~/.meta/plugins");
+}
+
+/// Print help for `meta plugin list` without listing installed plugins.
+fn print_plugin_list_help() {
+    println!("meta plugin list - List installed plugins");
+    println!();
+    println!("Usage: meta plugin list [--local]");
+    println!();
+    println!("Options:");
+    println!("      --local   List only project-local plugins");
+}
+
+/// Print help for `meta plugin uninstall` without requiring a plugin name.
+fn print_plugin_uninstall_help() {
+    println!("meta plugin uninstall - Uninstall a plugin");
+    println!();
+    println!("Usage: meta plugin uninstall <NAME> [--local]");
+    println!();
+    println!("Options:");
+    println!("      --local   Uninstall from .meta/plugins instead of ~/.meta/plugins");
+}
+
+/// Print help for `meta plugin update` without checking the registry.
+fn print_plugin_update_help() {
+    println!("meta plugin update - Update plugins to latest versions");
+    println!();
+    println!("Usage: meta plugin update [NAME] [--local] [--check]");
+    println!();
+    println!("Options:");
+    println!("      --local   Update project-local plugins");
+    println!("      --check   Check for updates without installing");
+}
+
 // === Main Entry Point ===
 
 fn main() -> Result<()> {
@@ -394,7 +482,15 @@ fn main() -> Result<()> {
             print_help_with_plugins(&subprocess_plugins, false);
             std::process::exit(0);
         }
+        Some(Commands::Help) => {
+            print_help_with_plugins(&subprocess_plugins, false);
+            std::process::exit(0);
+        }
         Some(Commands::Context(args)) => {
+            if cli.help {
+                print_context_help();
+                return Ok(());
+            }
             meta_cli::context::handle_context(cli.json, args.no_status, args.no_cache, cli.verbose)
         }
         Some(Commands::Init(args)) => {
@@ -406,9 +502,13 @@ fn main() -> Result<()> {
             };
             init::handle_init_command(cmd, cli.verbose)
         }
-        Some(Commands::Plugin(args)) => {
-            handle_plugin_command(args.command, cli.verbose, cli.json, &subprocess_plugins)
-        }
+        Some(Commands::Plugin(args)) => handle_plugin_command(
+            args.command,
+            cli.verbose,
+            cli.json,
+            cli.help,
+            &subprocess_plugins,
+        ),
         Some(Commands::Exec(args)) => {
             // Handle help flag for exec command specifically
             if cli.help {
@@ -438,16 +538,15 @@ fn main() -> Result<()> {
             let mut args = args;
             extract_global_flags(&mut args, &mut cli);
 
-            // Check for plugin help request (explicit --help flag)
-            // For bare commands like "worktree", let them pass through to plugin execution
-            // so the plugin can show command-specific help (e.g., worktree options)
+            // Keep root plugin help fast and plugin-aware, but let nested help
+            // requests reach the matched plugin command implementation.
             if let Some(first) = args.first() {
                 let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
                 let is_bare = args.len() == 1;
+                let is_root_help = wants_help
+                    && args.len() == 2
+                    && matches!(args.get(1).map(String::as_str), Some("--help" | "-h"));
 
-                // Only intercept with get_plugin_help for:
-                // 1. Explicit --help requests (e.g., "meta git --help")
-                // 2. Bare plugin names (e.g., "meta git"), NOT bare promoted commands
                 let promoted_commands: Vec<String> = subprocess_plugins
                     .get_promoted_commands()
                     .iter()
@@ -455,11 +554,28 @@ fn main() -> Result<()> {
                     .collect();
                 let is_promoted = promoted_commands.contains(&first.to_string());
 
-                // For promoted commands (like "worktree"), let them execute normally
-                // so the plugin can display command-specific help
-                if wants_help || (is_bare && !is_promoted) {
+                if is_root_help || (is_bare && !is_promoted) {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
                         println!("{help_text}");
+                        return Ok(());
+                    }
+                }
+
+                if wants_help {
+                    let command_str = args.join(" ");
+                    let options = PluginRequestOptions {
+                        json_output: cli.json,
+                        verbose: cli.verbose,
+                        parallel: cli.parallel,
+                        dry_run: cli.dry_run,
+                        silent: cli.silent,
+                        recursive: cli.recursive,
+                        depth: cli.depth,
+                        include_filters: cli.include.clone(),
+                        exclude_filters: cli.exclude.clone(),
+                        strict: cli.strict,
+                    };
+                    if subprocess_plugins.execute(&command_str, &args, &[], options)? {
                         return Ok(());
                     }
                 }
@@ -853,6 +969,7 @@ fn handle_plugin_command(
     command: Option<PluginCommands>,
     verbose: bool,
     json: bool,
+    help: bool,
     subprocess_plugins: &SubprocessPluginManager,
 ) -> Result<()> {
     use registry::{PluginInstaller, RegistryClient, PLUGIN_PREFIX};
@@ -860,19 +977,20 @@ fn handle_plugin_command(
     let command = match command {
         Some(cmd) => cmd,
         None => {
-            println!("Usage: meta plugin <command>");
-            println!();
-            println!("Commands:");
-            println!("  search <query>        Search for plugins in the registry");
-            println!("  install <name>        Install a plugin (add --local for project-local)");
-            println!("  list                  List installed plugins (add --local for project-local only)");
-            println!("  uninstall <name>      Uninstall a plugin (add --local for project-local)");
+            print_plugin_help();
             return Ok(());
         }
     };
 
     match command {
         PluginCommands::Search { query } => {
+            if help {
+                print_plugin_search_help();
+                return Ok(());
+            }
+            let Some(query) = query else {
+                anyhow::bail!("Usage: meta plugin search <QUERY>");
+            };
             let client = RegistryClient::new(verbose)?;
             let results = client.search(&query)?;
 
@@ -892,6 +1010,13 @@ fn handle_plugin_command(
             }
         }
         PluginCommands::Install { name, local } => {
+            if help {
+                print_plugin_install_help();
+                return Ok(());
+            }
+            let Some(name) = name else {
+                anyhow::bail!("Usage: meta plugin install <NAME> [--local]");
+            };
             use registry::GitHubShorthand;
             let installer = create_installer(local, verbose)?;
             let location = format_plugin_location(local);
@@ -946,6 +1071,10 @@ fn handle_plugin_command(
             }
         }
         PluginCommands::List { local } => {
+            if help {
+                print_plugin_list_help();
+                return Ok(());
+            }
             if local {
                 // For --local, use the registry-based listing for plugin management
                 let plugins = match PluginInstaller::new_local(verbose) {
@@ -1010,6 +1139,13 @@ fn handle_plugin_command(
             }
         }
         PluginCommands::Uninstall { name, local } => {
+            if help {
+                print_plugin_uninstall_help();
+                return Ok(());
+            }
+            let Some(name) = name else {
+                anyhow::bail!("Usage: meta plugin uninstall <NAME> [--local]");
+            };
             let installer = create_installer(local, verbose)?;
             let location = format_plugin_location(local);
             installer.uninstall(&name)?;
@@ -1019,6 +1155,10 @@ fn handle_plugin_command(
             }
         }
         PluginCommands::Update { name, local, check } => {
+            if help {
+                print_plugin_update_help();
+                return Ok(());
+            }
             let installer = create_installer(local, verbose)?;
             let location = format_plugin_location(local);
 
