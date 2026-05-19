@@ -399,6 +399,7 @@ fn write_help_with_plugin_commands(
     Ok(())
 }
 
+/// Print help for the built-in `meta agent` command family.
 fn print_agent_help() {
     println!("meta agent - Agent integration commands");
     println!();
@@ -412,6 +413,7 @@ fn print_agent_help() {
     println!("  -h, --help   Print help");
 }
 
+/// Print help for `meta context` without generating workspace context.
 fn print_context_help() {
     println!("meta context - Show workspace context summary");
     println!();
@@ -425,6 +427,7 @@ fn print_context_help() {
     println!("Shows the current meta workspace, repos, branches, status, key commands, and dependencies.");
 }
 
+/// Print help for the built-in plugin management command family.
 fn print_plugin_help() {
     println!("meta plugin - Manage subprocess plugins");
     println!();
@@ -438,6 +441,7 @@ fn print_plugin_help() {
     println!("  update [name]         Update plugins to latest versions");
 }
 
+/// Print help for `meta plugin search` without requiring a query.
 fn print_plugin_search_help() {
     println!("meta plugin search - Search for plugins in the registry");
     println!();
@@ -447,6 +451,7 @@ fn print_plugin_search_help() {
     println!("  <QUERY>   Search query");
 }
 
+/// Print help for `meta plugin install` without requiring a plugin name.
 fn print_plugin_install_help() {
     println!("meta plugin install - Install a plugin from the registry");
     println!();
@@ -456,6 +461,7 @@ fn print_plugin_install_help() {
     println!("      --local   Install to .meta/plugins instead of ~/.meta/plugins");
 }
 
+/// Print help for `meta plugin list` without listing installed plugins.
 fn print_plugin_list_help() {
     println!("meta plugin list - List installed plugins");
     println!();
@@ -465,6 +471,7 @@ fn print_plugin_list_help() {
     println!("      --local   List only project-local plugins");
 }
 
+/// Print help for `meta plugin uninstall` without requiring a plugin name.
 fn print_plugin_uninstall_help() {
     println!("meta plugin uninstall - Uninstall a plugin");
     println!();
@@ -474,6 +481,7 @@ fn print_plugin_uninstall_help() {
     println!("      --local   Uninstall from .meta/plugins instead of ~/.meta/plugins");
 }
 
+/// Print help for `meta plugin update` without checking the registry.
 fn print_plugin_update_help() {
     println!("meta plugin update - Update plugins to latest versions");
     println!();
