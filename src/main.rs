@@ -131,8 +131,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Agent integration commands
-    Agent(AgentArgs),
     /// Show workspace context summary
     Context(ContextArgs),
     /// Execute a command across all repos
@@ -145,29 +143,6 @@ enum Commands {
     Plugin(PluginArgs),
     #[command(external_subcommand)]
     External(Vec<String>),
-}
-
-/// Arguments for `meta agent`
-#[derive(Args)]
-struct AgentArgs {
-    #[command(subcommand)]
-    command: Option<AgentCommands>,
-}
-
-#[derive(Subcommand)]
-enum AgentCommands {
-    /// Evaluate a command for destructive patterns (PreToolUse hook)
-    Guard,
-    /// Score Claude Code sessions for agent effectiveness
-    Score {
-        /// Specific session ID to score
-        #[arg(long)]
-        session: Option<String>,
-
-        /// Score N most recent sessions
-        #[arg(long, conflicts_with = "session")]
-        recent: Option<usize>,
-    },
 }
 
 /// Arguments for `meta context`
@@ -399,20 +374,6 @@ fn write_help_with_plugin_commands(
     Ok(())
 }
 
-/// Print help for the built-in `meta agent` command family.
-fn print_agent_help() {
-    println!("meta agent - Agent integration commands");
-    println!();
-    println!("Usage: meta agent <COMMAND>");
-    println!();
-    println!("Commands:");
-    println!("  guard   Evaluate a command for destructive patterns (PreToolUse hook)");
-    println!("  score   Score Claude Code sessions for agent effectiveness");
-    println!();
-    println!("Options:");
-    println!("  -h, --help   Print help");
-}
-
 /// Print help for `meta context` without generating workspace context.
 fn print_context_help() {
     println!("meta context - Show workspace context summary");
@@ -525,26 +486,6 @@ fn main() -> Result<()> {
             print_help_with_plugins(&subprocess_plugins, false);
             std::process::exit(0);
         }
-        Some(Commands::Agent(args)) => match args.command {
-            _ if cli.help => {
-                print_agent_help();
-                Ok(())
-            }
-            Some(AgentCommands::Guard) => meta_cli::agent_guard::handle_guard(),
-            Some(AgentCommands::Score { session, recent }) => {
-                meta_cli::agent_score::handle_score(session, recent, cli.json, cli.verbose)
-            }
-            None => {
-                eprintln!("Usage: meta agent <command>");
-                eprintln!();
-                eprintln!("Commands:");
-                eprintln!(
-                    "  guard   Evaluate a command for destructive patterns (PreToolUse hook)"
-                );
-                eprintln!("  score   Score Claude Code sessions for agent effectiveness");
-                Ok(())
-            }
-        },
         Some(Commands::Context(args)) => {
             if cli.help {
                 print_context_help();

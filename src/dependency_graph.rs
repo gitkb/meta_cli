@@ -407,7 +407,7 @@ impl DependencyGraph {
             .iter()
             .map(|(name, deps)| (name.clone(), deps.len()))
             .collect();
-        dependent_counts.sort_by_key(|(_, count)| std::cmp::Reverse(*count));
+        dependent_counts.sort_by_key(|d| std::cmp::Reverse(d.1));
         let most_depended_on: Vec<(String, usize)> = dependent_counts
             .into_iter()
             .filter(|(_, count)| *count > 0)
