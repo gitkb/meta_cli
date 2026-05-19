@@ -305,7 +305,7 @@ fn build_meta_hooks() -> Map<String, Value> {
             "matcher": "Bash",
             "hooks": [{
                 "type": "command",
-                "command": "meta agent guard",
+                "command": "agent guard",
                 "timeout": 5
             }]
         }]),
@@ -500,7 +500,7 @@ mod tests {
         assert!(settings_content.contains("PreToolUse"));
         assert!(settings_content.contains("PreCompact"));
         assert!(settings_content.contains("meta context"));
-        assert!(settings_content.contains("meta agent guard"));
+        assert!(settings_content.contains("agent guard"));
     }
 
     #[test]
@@ -739,13 +739,13 @@ mod tests {
             .unwrap()
             .contains("meta context"));
 
-        // PreToolUse should have Bash matcher and call meta agent guard
+        // PreToolUse should have Bash matcher and call agent guard
         let pre_tool = &hooks["PreToolUse"];
         assert_eq!(pre_tool[0]["matcher"], "Bash");
         assert!(pre_tool[0]["hooks"][0]["command"]
             .as_str()
             .unwrap()
-            .contains("meta agent guard"));
+            .contains("agent guard"));
 
         // PreCompact should call meta context
         let pre_compact = &hooks["PreCompact"];
