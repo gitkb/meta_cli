@@ -1026,17 +1026,23 @@ impl PluginInstaller {
         let cursor = std::io::Cursor::new(bytes);
         let mut archive = zip::ZipArchive::new(cursor)?;
 
+        // Preflight every entry and name before creating or replacing any plugins.
+        let mut entries = Vec::new();
         for i in 0..archive.len() {
-            let mut file = archive.by_index(i)?;
+            let file = archive.by_index(i)?;
             let file_name = file.name()?.into_owned();
-
             if file_name.starts_with(PLUGIN_PREFIX) {
-                let dest = self.plugins_dir.join(&file_name);
-                let mut dest_file = std::fs::File::create(&dest)?;
-                std::io::copy(&mut file, &mut dest_file)?;
-                make_executable(&dest)?;
-                installed.push(file_name);
+                entries.push((i, file_name));
             }
+        }
+
+        for (i, file_name) in entries {
+            let mut file = archive.by_index(i)?;
+            let dest = self.plugins_dir.join(&file_name);
+            let mut dest_file = std::fs::File::create(&dest)?;
+            std::io::copy(&mut file, &mut dest_file)?;
+            make_executable(&dest)?;
+            installed.push(file_name);
         }
 
         Ok(installed)
@@ -1499,6 +1505,60 @@ mod tests {
         assert!(dir.path().join("meta-plugin").exists());
         assert!(!dir.path().join("readme.txt").exists());
         assert!(!dir.path().join("other-binary").exists());
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_late_entry_error_before_writing_plugins() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        let mut zip_data = Vec::new();
+        {
+            let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
+            for name in ["meta-test", "readme.txt"] {
+                zip.start_file(name, SimpleFileOptions::default()).unwrap();
+                zip.write_all(b"replacement plugin").unwrap();
+            }
+            zip.finish().unwrap();
+        }
+
+        // Keep the central directory valid, but make the later local header unreadable.
+        let later_header = {
+            let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data)).unwrap();
+            let file = archive.by_index(1).unwrap();
+            file.header_start() as usize
+        };
+        zip_data[later_header..later_header + 4].copy_from_slice(b"BAD!");
+
+        let mut archive = zip::ZipArchive::new(std::io::Cursor::new(&zip_data)).unwrap();
+        assert_eq!(archive.by_index(0).unwrap().name().unwrap(), "meta-test");
+        let entry_error = archive
+            .by_index(1)
+            .expect_err("later entry must fail after the first entry opened")
+            .to_string();
+
+        for existing_plugin in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let plugin_path = dir.path().join("meta-test");
+            if existing_plugin {
+                std::fs::write(&plugin_path, b"original plugin").unwrap();
+            }
+            let installer = PluginInstaller {
+                plugins_dir: dir.path().to_path_buf(),
+                verbose: false,
+                scope: InstallScope::Global,
+            };
+
+            let error = installer
+                .extract_and_validate("https://example.com/plugin.zip", &zip_data)
+                .unwrap_err();
+            assert_eq!(error.to_string(), entry_error);
+            if existing_plugin {
+                assert_eq!(std::fs::read(&plugin_path).unwrap(), b"original plugin");
+            } else {
+                assert!(!plugin_path.exists(), "failed install left a plugin behind");
+            }
+        }
     }
 
     #[test]
