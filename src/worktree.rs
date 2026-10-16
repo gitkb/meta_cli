@@ -165,6 +165,94 @@ fn discover_repos_recursive(
     Ok(())
 }
 
+/// Discover all realized worktrees, including repos nested beneath other repos.
+/// Unlike legacy discovery, traversal errors are fatal. Hidden directories and
+/// directory symlinks are excluded; traversal never follows links outside the set.
+/// A finite entry budget prevents unbounded scans of generated directory trees.
+pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
+    let mut repos = Vec::new();
+    let entries = walkdir::WalkDir::new(task_dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| {
+            entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
+        });
+    for (count, entry) in entries.enumerate() {
+        anyhow::ensure!(
+            count < 2_000_000,
+            "Recursive worktree discovery exceeded 2000000 entries"
+        );
+        let entry =
+            entry.with_context(|| format!("Cannot scan worktree {}", task_dir.display()))?;
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        let path = entry.path();
+        let git_file = path.join(".git");
+        let metadata = match git_file.symlink_metadata() {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(error) => {
+                return Err(error).with_context(|| format!("Cannot inspect {}", git_file.display()))
+            }
+        };
+        if !metadata.is_file() {
+            continue;
+        }
+        validate_worktree_gitfile(&git_file)?;
+        let source_path = source_repo_from_gitfile(&git_file)?;
+        let alias = if path == task_dir {
+            ".".to_string()
+        } else {
+            path.strip_prefix(task_dir)?.to_string_lossy().to_string()
+        };
+        repos.push(WorktreeRepoInfo {
+            alias,
+            branch: git_utils::current_branch(path).unwrap_or_else(|| "HEAD".to_string()),
+            path: path.to_path_buf(),
+            source_path,
+            created_branch: None,
+        });
+    }
+    repos.sort_by(|a, b| a.alias.cmp(&b.alias));
+    Ok(repos)
+}
+
+/// Require a live linked-worktree admin directory and matching backlink.
+/// Kept separate from legacy discovery so strict checks remain opt-in.
+fn validate_worktree_gitfile(git_file: &Path) -> Result<()> {
+    let content = std::fs::read_to_string(git_file)?;
+    let target = content
+        .trim()
+        .strip_prefix("gitdir: ")
+        .ok_or_else(|| anyhow::anyhow!("Invalid .git file format at {}", git_file.display()))?;
+    let admin = git_file
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(target)
+        .canonicalize()
+        .with_context(|| format!("Missing worktree metadata for {}", git_file.display()))?;
+    anyhow::ensure!(
+        admin.join("HEAD").is_file(),
+        "Missing worktree HEAD at {}",
+        admin.display()
+    );
+    let common = std::fs::read_to_string(admin.join("commondir"))?;
+    let common = admin.join(common.trim()).canonicalize()?;
+    anyhow::ensure!(
+        common.join("HEAD").is_file() && common.join("objects").is_dir(),
+        "Incomplete common Git metadata at {}",
+        common.display()
+    );
+    let backlink = std::fs::read_to_string(admin.join("gitdir"))?;
+    anyhow::ensure!(
+        admin.join(backlink.trim()).canonicalize()? == git_file.canonicalize()?,
+        "Worktree metadata backlink does not match {}",
+        git_file.display()
+    );
+    Ok(())
+}
+
 /// Parse a .git file to find the primary checkout path.
 /// .git file contains: "gitdir: /path/to/primary/.git/worktrees/<name>"
 fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
@@ -179,6 +267,16 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     // gitdir points to: /path/to/primary/.git/worktrees/<name>
     // We need: /path/to/primary/
     let gitdir_path = PathBuf::from(gitdir);
+    let gitdir_path = if gitdir_path.is_absolute() {
+        gitdir_path
+    } else {
+        git_file
+            .parent()
+            .unwrap_or(Path::new("."))
+            .join(gitdir_path)
+            .canonicalize()
+            .with_context(|| format!("Cannot resolve gitdir from {}", git_file.display()))?
+    };
     // Walk up: worktrees/<name> -> .git -> repo root
     let dot_git_dir = gitdir_path
         .parent() // strip worktree name
@@ -194,4 +292,172 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     })?;
 
     Ok(repo_root.to_path_buf())
+}
+
+#[cfg(test)]
+mod recursive_tests {
+    use super::*;
+
+    /// Create a real committed repository and linked worktree in the fixture.
+    fn member(root: &Path, alias: &str) {
+        let sources = if alias == "." {
+            root.parent().unwrap().join(".sources")
+        } else {
+            root.join(".sources")
+        };
+        std::fs::create_dir_all(&sources).unwrap();
+        let source = sources.join(format!(
+            "repo{}",
+            std::fs::read_dir(&sources).unwrap().count()
+        ));
+        std::fs::create_dir(&source).unwrap();
+        git(&source, &["init", "-q"]);
+        git(
+            &source,
+            &[
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.com",
+                "commit",
+                "--allow-empty",
+                "-qm",
+                "initial",
+            ],
+        );
+        git(
+            &source,
+            &[
+                "worktree",
+                "add",
+                "-qb",
+                "topic",
+                root.join(alias).to_str().unwrap(),
+            ],
+        );
+    }
+
+    /// Execute fixture Git commands with failures surfaced in test output.
+    fn git(path: &Path, args: &[&str]) {
+        let out = std::process::Command::new("git")
+            .arg("-C")
+            .arg(path)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            out.status.success(),
+            "{}",
+            String::from_utf8_lossy(&out.stderr)
+        );
+    }
+
+    /// Normalize separators for platform-independent alias assertions.
+    fn aliases(repos: Vec<WorktreeRepoInfo>) -> Vec<String> {
+        repos
+            .into_iter()
+            .map(|repo| repo.alias.replace('\\', "/"))
+            .collect()
+    }
+
+    #[test]
+    /// Nested members keep sorted distinct aliases and default boundaries.
+    fn recursive_members_preserve_legacy_boundaries_and_sorted_full_aliases() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = &temp.path().join("set");
+        for alias in [".", "open-source", "open-source/atc", "other/atc"] {
+            member(root, alias);
+        }
+        std::fs::create_dir_all(root.join("configured-but-absent")).unwrap();
+        assert_eq!(
+            aliases(discover_worktree_repos(root).unwrap()),
+            [".", "open-source", "other/atc"]
+        );
+        assert_eq!(
+            aliases(discover_worktree_repos_recursive(root).unwrap()),
+            [".", "open-source", "open-source/atc", "other/atc"]
+        );
+    }
+
+    #[test]
+    /// Malformed nested Git files fail instead of silently omitting members.
+    fn recursive_malformed_member_is_error_instead_of_partial_inventory() {
+        let temp = tempfile::tempdir().unwrap();
+        member(temp.path(), "parent");
+        let child = temp.path().join("parent/broken");
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join(".git"), "invalid").unwrap();
+        assert!(discover_worktree_repos_recursive(temp.path()).is_err());
+        assert_eq!(
+            aliases(discover_worktree_repos(temp.path()).unwrap()),
+            ["parent"]
+        );
+    }
+
+    #[test]
+    /// Missing roots cannot be represented as complete empty inventories.
+    fn recursive_missing_root_is_error() {
+        let temp = tempfile::tempdir().unwrap();
+        assert!(discover_worktree_repos_recursive(&temp.path().join("missing")).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    /// Hidden directories and symlink cycles are excluded from traversal.
+    fn recursive_skips_hidden_directories_and_symlink_cycles() {
+        let temp = tempfile::tempdir().unwrap();
+        member(temp.path(), "visible");
+        member(temp.path(), ".hidden/child");
+        std::os::unix::fs::symlink(temp.path(), temp.path().join("visible/cycle")).unwrap();
+        assert_eq!(
+            aliases(discover_worktree_repos_recursive(temp.path()).unwrap()),
+            ["visible"]
+        );
+    }
+    /// Relative Git links resolve against the checkout, independently of cwd.
+    #[test]
+    fn relative_gitdir_reports_absolute_source() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("set");
+        member(&root, ".");
+        let source = temp.path().join(".sources/repo0").canonicalize().unwrap();
+        let git_file = root.join(".git");
+        let content = std::fs::read_to_string(&git_file).unwrap();
+        let admin = Path::new(content.trim().strip_prefix("gitdir: ").unwrap());
+        let name = admin.file_name().unwrap().to_str().unwrap();
+        std::fs::write(
+            &git_file,
+            format!("gitdir: ../.sources/repo0/.git/worktrees/{name}\n"),
+        )
+        .unwrap();
+        assert_eq!(source_repo_from_gitfile(&git_file).unwrap(), source);
+        assert_eq!(
+            discover_worktree_repos_recursive(&root).unwrap()[0].source_path,
+            source
+        );
+        assert_eq!(
+            discover_worktree_repos(&root).unwrap()[0].source_path,
+            source
+        );
+    }
+
+    /// Dangling and incomplete admin links must not produce successful members.
+    #[test]
+    fn recursive_rejects_missing_worktree_metadata() {
+        for missing in ["HEAD", "commondir", "gitdir", "entire-admin"] {
+            let temp = tempfile::tempdir().unwrap();
+            member(temp.path(), "child");
+            let content = std::fs::read_to_string(temp.path().join("child/.git")).unwrap();
+            let admin = Path::new(content.trim().strip_prefix("gitdir: ").unwrap());
+            if missing == "entire-admin" {
+                std::fs::remove_dir_all(admin).unwrap();
+            } else {
+                std::fs::remove_file(admin.join(missing)).unwrap();
+            }
+            assert!(
+                discover_worktree_repos_recursive(temp.path()).is_err(),
+                "{missing}"
+            );
+        }
+    }
 }
