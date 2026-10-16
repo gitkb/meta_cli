@@ -1028,7 +1028,7 @@ impl PluginInstaller {
 
         for i in 0..archive.len() {
             let mut file = archive.by_index(i)?;
-            let file_name = file.name().to_string();
+            let file_name = file.name()?.into_owned();
 
             if file_name.starts_with(PLUGIN_PREFIX) {
                 let dest = self.plugins_dir.join(&file_name);
@@ -1440,7 +1440,7 @@ mod tests {
     #[test]
     fn test_extract_zip() {
         use std::io::Write;
-        use zip::write::FileOptions;
+        use zip::write::SimpleFileOptions;
 
         let dir = tempfile::tempdir().unwrap();
         let installer = PluginInstaller {
@@ -1453,7 +1453,7 @@ mod tests {
         let mut zip_data = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
-            let options = FileOptions::default();
+            let options = SimpleFileOptions::default();
             zip.start_file("meta-test", options).unwrap();
             zip.write_all(b"#!/bin/sh\necho test").unwrap();
             zip.finish().unwrap();
@@ -1469,7 +1469,7 @@ mod tests {
     #[test]
     fn test_extract_zip_filters_non_meta_files() {
         use std::io::Write;
-        use zip::write::FileOptions;
+        use zip::write::SimpleFileOptions;
 
         let dir = tempfile::tempdir().unwrap();
         let installer = PluginInstaller {
@@ -1482,7 +1482,7 @@ mod tests {
         let mut zip_data = Vec::new();
         {
             let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
-            let options = FileOptions::default();
+            let options = SimpleFileOptions::default();
 
             for name in &["meta-plugin", "readme.txt", "other-binary"] {
                 zip.start_file(*name, options).unwrap();
