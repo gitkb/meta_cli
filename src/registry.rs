@@ -1032,6 +1032,11 @@ impl PluginInstaller {
             let file = archive.by_index(i)?;
             let file_name = file.name()?.into_owned();
             if file_name.starts_with(PLUGIN_PREFIX) {
+                // Require one filename component on both Unix and Windows.
+                anyhow::ensure!(
+                    !file_name.contains(['/', '\\']),
+                    "ZIP plugin entry must be a top-level filename: {file_name}"
+                );
                 entries.push((i, file_name));
             }
         }
@@ -1557,6 +1562,63 @@ mod tests {
                 assert_eq!(std::fs::read(&plugin_path).unwrap(), b"original plugin");
             } else {
                 assert!(!plugin_path.exists(), "failed install left a plugin behind");
+            }
+        }
+    }
+
+    #[test]
+    fn test_extract_zip_rejects_plugin_paths_before_writing_plugins() {
+        use std::io::Write;
+        use zip::write::SimpleFileOptions;
+
+        for invalid_name in [
+            "meta-dir/../../escaped",
+            r"meta-dir\..\..\escaped",
+            "meta-dir/child",
+            r"meta-dir\child",
+        ] {
+            let mut zip_data = Vec::new();
+            {
+                let mut zip = zip::ZipWriter::new(std::io::Cursor::new(&mut zip_data));
+                for name in ["meta-test", invalid_name] {
+                    zip.start_file(name, SimpleFileOptions::default()).unwrap();
+                    zip.write_all(b"replacement plugin").unwrap();
+                }
+                zip.finish().unwrap();
+            }
+
+            for existing_plugin in [false, true] {
+                let dir = tempfile::tempdir().unwrap();
+                let plugins_dir = dir.path().join("plugins");
+                // Make traversal possible instead of relying on a missing parent directory.
+                std::fs::create_dir_all(plugins_dir.join("meta-dir")).unwrap();
+                let plugin_path = plugins_dir.join("meta-test");
+                if existing_plugin {
+                    std::fs::write(&plugin_path, b"original plugin").unwrap();
+                }
+                let installer = PluginInstaller {
+                    plugins_dir: plugins_dir.clone(),
+                    verbose: false,
+                    scope: InstallScope::Global,
+                };
+
+                let error = installer.extract_zip(&zip_data).unwrap_err();
+                assert!(
+                    error.to_string().contains("top-level filename"),
+                    "unexpected error for {invalid_name:?}: {error}"
+                );
+                assert!(!dir.path().join("escaped").exists());
+                assert_eq!(
+                    std::fs::read_dir(plugins_dir.join("meta-dir"))
+                        .unwrap()
+                        .count(),
+                    0
+                );
+                if existing_plugin {
+                    assert_eq!(std::fs::read(&plugin_path).unwrap(), b"original plugin");
+                } else {
+                    assert!(!plugin_path.exists(), "invalid path left a plugin behind");
+                }
             }
         }
     }
