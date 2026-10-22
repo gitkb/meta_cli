@@ -45,7 +45,7 @@ pub fn detect_worktree_context(cwd: &Path) -> Option<(String, PathBuf, Vec<PathB
 
                 // Reconstruct the task directory: everything up to and including .worktrees/<task>
                 let task_dir: PathBuf = components[..=i + 1].iter().collect();
-                let repos = discover_worktree_repos(&task_dir).ok()?;
+                let repos = discover_worktree_members(&task_dir).ok()?;
                 if repos.is_empty() {
                     return None;
                 }
@@ -61,6 +61,25 @@ pub fn detect_worktree_context(cwd: &Path) -> Option<(String, PathBuf, Vec<PathB
 /// Discover repos within a worktree task directory by scanning for .git files.
 /// Results are sorted by alias for deterministic output.
 pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
+    Ok(discover_worktree_members(task_dir)?
+        .into_iter()
+        .map(with_branch)
+        .collect())
+}
+
+fn with_branch(member: WorktreeMemberInfo) -> WorktreeRepoInfo {
+    WorktreeRepoInfo {
+        branch: git_utils::current_branch(&member.path).unwrap_or_else(|| "HEAD".to_string()),
+        alias: member.alias,
+        path: member.path,
+        source_path: member.source_path,
+        created_branch: None,
+    }
+}
+
+/// Legacy discovery boundaries without branch probes. Implicit command scoping
+/// only needs repository paths; it must not start Git for each member.
+pub fn discover_worktree_members(task_dir: &Path) -> Result<Vec<WorktreeMemberInfo>> {
     let mut repos = Vec::new();
 
     // Check if the task dir itself is a worktree (the "." alias)
@@ -71,13 +90,10 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
         .unwrap_or(false)
     {
         let source = source_repo_from_gitfile(&dot_git)?;
-        let branch = git_utils::current_branch(task_dir).unwrap_or_else(|| "HEAD".to_string());
-        repos.push(WorktreeRepoInfo {
+        repos.push(WorktreeMemberInfo {
             alias: ".".to_string(),
-            branch,
             path: task_dir.to_path_buf(),
             source_path: source,
-            created_branch: None,
         });
     }
 
@@ -103,7 +119,7 @@ pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>>
 fn discover_repos_recursive(
     root: &Path,
     dir: &Path,
-    repos: &mut Vec<WorktreeRepoInfo>,
+    repos: &mut Vec<WorktreeMemberInfo>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
@@ -142,18 +158,15 @@ fn discover_repos_recursive(
                     continue;
                 }
             };
-            let branch = git_utils::current_branch(&sub_path).unwrap_or_else(|| "HEAD".to_string());
             let alias = sub_path
                 .strip_prefix(root)
                 .unwrap_or(&sub_path)
                 .to_string_lossy()
                 .to_string();
-            repos.push(WorktreeRepoInfo {
+            repos.push(WorktreeMemberInfo {
                 alias,
-                branch,
                 path: sub_path,
                 source_path: source,
-                created_branch: None,
             });
         } else {
             // Not a repo — recurse into intermediate directory
@@ -170,6 +183,23 @@ fn discover_repos_recursive(
 /// directory symlinks are excluded; traversal never follows links outside the set.
 /// A finite entry budget prevents unbounded scans of generated directory trees.
 pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
+    Ok(discover_worktree_members_recursive(task_dir)?
+        .into_iter()
+        .map(with_branch)
+        .collect())
+}
+
+/// Realized membership without branch, dirty-state or ahead/behind probes.
+/// This uses the same strict bounded traversal and Git backlink validation as
+/// recursive status, but never launches Git. Consumers can observe Git once.
+#[derive(Debug, Clone, Serialize)]
+pub struct WorktreeMemberInfo {
+    pub alias: String,
+    pub path: PathBuf,
+    pub source_path: PathBuf,
+}
+
+pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<WorktreeMemberInfo>> {
     let mut repos = Vec::new();
     let entries = walkdir::WalkDir::new(task_dir)
         .follow_links(false)
@@ -206,12 +236,10 @@ pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<Worktree
         } else {
             path.strip_prefix(task_dir)?.to_string_lossy().to_string()
         };
-        repos.push(WorktreeRepoInfo {
+        repos.push(WorktreeMemberInfo {
             alias,
-            branch: git_utils::current_branch(path).unwrap_or_else(|| "HEAD".to_string()),
             path: path.to_path_buf(),
             source_path,
-            created_branch: None,
         });
     }
     repos.sort_by(|a, b| a.alias.cmp(&b.alias));
@@ -377,6 +405,27 @@ mod recursive_tests {
             aliases(discover_worktree_repos_recursive(root).unwrap()),
             [".", "open-source", "open-source/atc", "other/atc"]
         );
+    }
+
+    #[test]
+    fn implicit_context_keeps_legacy_scope_without_collecting_branch_facts() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join(".worktrees/example");
+        for alias in [".", "parent", "parent/nested"] {
+            member(&root, alias);
+        }
+        let (name, observed_root, paths) =
+            detect_worktree_context(&root.join("parent/nested")).unwrap();
+        assert_eq!(name, "example");
+        assert_eq!(observed_root, root);
+        assert_eq!(paths, vec![root.clone(), root.join("parent")]);
+        let metadata = discover_worktree_members_recursive(&root).unwrap();
+        assert_eq!(metadata.len(), 3);
+        for row in metadata {
+            let json = serde_json::to_value(row).unwrap();
+            assert!(json.get("branch").is_none());
+            assert!(json.get("dirty").is_none());
+        }
     }
 
     #[test]
