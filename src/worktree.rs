@@ -29,6 +29,19 @@ pub struct WorktreeRepoInfo {
 /// Walks the path components looking for a `.worktrees` segment followed by a task name.
 /// Works whether cwd is the task dir itself, a repo within it, or deeper inside a repo.
 pub fn detect_worktree_context(cwd: &Path) -> Option<(String, PathBuf, Vec<PathBuf>)> {
+    let (task_name, task_dir) = detect_worktree_location(cwd)?;
+    let repos = discover_worktree_members(&task_dir).ok()?;
+    if repos.is_empty() {
+        return None;
+    }
+    let paths = repos.into_iter().map(|r| r.path).collect();
+    Some((task_name, task_dir, paths))
+}
+
+/// Locate the enclosing `.worktrees/<name>` set without scanning its contents.
+/// This is a location hint, not validation. Callers must validate membership and
+/// report errors rather than silently falling back to a different set on failure.
+pub fn detect_worktree_location(cwd: &Path) -> Option<(String, PathBuf)> {
     use std::path::Component;
 
     let components: Vec<_> = cwd.components().collect();
@@ -45,12 +58,7 @@ pub fn detect_worktree_context(cwd: &Path) -> Option<(String, PathBuf, Vec<PathB
 
                 // Reconstruct the task directory: everything up to and including .worktrees/<task>
                 let task_dir: PathBuf = components[..=i + 1].iter().collect();
-                let repos = discover_worktree_members(&task_dir).ok()?;
-                if repos.is_empty() {
-                    return None;
-                }
-                let paths = repos.iter().map(|r| r.path.clone()).collect();
-                return Some((task_name, task_dir, paths));
+                return Some((task_name, task_dir));
             }
         }
     }
