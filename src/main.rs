@@ -575,7 +575,7 @@ fn main() -> Result<()> {
                         exclude_filters: cli.exclude.clone(),
                         strict: cli.strict,
                     };
-                    if subprocess_plugins.execute(&command_str, &args, &[], options)? {
+                    if subprocess_plugins.execute(&command_str, &args, &[], None, options)? {
                         return Ok(());
                     }
                 }
@@ -656,7 +656,7 @@ fn handle_command_dispatch(
             strict: cli.strict,
         };
 
-        if plugins.execute("git clone", &command_args, &[], subprocess_options)? {
+        if plugins.execute("git clone", &command_args, &[], None, subprocess_options)? {
             if cli.verbose {
                 println!("{}", "Git clone handled by subprocess plugin.".green());
             }
@@ -776,6 +776,7 @@ fn handle_command_dispatch(
                     &command_str,
                     &command_args,
                     &wt_directories,
+                    Some(&task_dir),
                     subprocess_options,
                 )? {
                     if cli.verbose {
@@ -931,6 +932,7 @@ fn handle_command_dispatch(
         &command_str,
         &command_args,
         &project_paths,
+        Some(meta_dir),
         subprocess_options,
     )? {
         log::info!("Command was handled by subprocess plugin");

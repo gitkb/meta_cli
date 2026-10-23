@@ -201,6 +201,7 @@ impl SubprocessPluginManager {
         command: &str,
         args: &[String],
         projects: &[String],
+        root_dir: Option<&Path>,
         options: PluginRequestOptions,
     ) -> Result<bool> {
         let cmd_parts: Vec<&str> = command.split_whitespace().collect();
@@ -236,7 +237,7 @@ impl SubprocessPluginManager {
         }
 
         if let Some((plugin, matched_cmd)) = best_match {
-            return self.execute_plugin(plugin, matched_cmd, args, projects, &options);
+            return self.execute_plugin(plugin, matched_cmd, args, projects, root_dir, &options);
         }
 
         Ok(false)
@@ -249,6 +250,7 @@ impl SubprocessPluginManager {
         command: &str,
         args: &[String],
         projects: &[String],
+        root_dir: Option<&Path>,
         options: &PluginRequestOptions,
     ) -> Result<bool> {
         // Extract the remaining args after the matched command
@@ -313,7 +315,7 @@ impl SubprocessPluginManager {
         match serde_json::from_str::<PluginResponse>(&stdout_str) {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
-                self.execute_plan(&response.plan, options)
+                self.execute_plan(&response.plan, root_dir, options)
             }
             Err(_) => {
                 // Couldn't parse as our protocol - print output as-is (legacy behavior)
@@ -324,7 +326,12 @@ impl SubprocessPluginManager {
     }
 
     /// Execute an execution plan via loop_lib
-    fn execute_plan(&self, plan: &ExecutionPlan, options: &PluginRequestOptions) -> Result<bool> {
+    fn execute_plan(
+        &self,
+        plan: &ExecutionPlan,
+        root_dir: Option<&Path>,
+        options: &PluginRequestOptions,
+    ) -> Result<bool> {
         use loop_lib::{run_commands, DirCommand, LoopConfig};
 
         // Phase 1: Run pre_commands sequentially (setup tasks like SSH ControlMaster)
@@ -379,8 +386,11 @@ impl SubprocessPluginManager {
                 })
                 .collect();
 
-            // The first command's directory is the meta root (should display as ".")
-            let root_dir = commands.first().map(|c| PathBuf::from(&c.dir));
+            // Repos are named by their path from the root (shown as "."). Without
+            // projects from meta_cli the plugin lists the root first.
+            let root_dir = root_dir
+                .map(Path::to_path_buf)
+                .or_else(|| commands.first().map(|c| PathBuf::from(&c.dir)));
 
             let config = LoopConfig {
                 directories: vec![],
