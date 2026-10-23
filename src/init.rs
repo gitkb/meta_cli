@@ -152,8 +152,9 @@ fn install_claude_integration_to(
         installed += 1;
 
         // Older releases wrote flat `<name>.md` files, which Claude Code does not load.
+        // Like other existing files, they are only replaced with --update or --force.
         let flat_path = skills_dir.join(format!("{name}.md"));
-        if flat_path.exists() {
+        if overwrite_content && flat_path.exists() {
             fs::remove_file(&flat_path)
                 .with_context(|| format!("Failed to remove {}", flat_path.display()))?;
             if verbose {
@@ -693,6 +694,21 @@ mod tests {
             assert!(skills_dir.join(name).join("SKILL.md").exists());
         }
         assert_eq!(fs::read_to_string(&unrelated).unwrap(), "not ours");
+    }
+
+    #[test]
+    fn test_default_install_keeps_flat_skill_files() {
+        let dir = tempdir().unwrap();
+
+        let skills_dir = dir.path().join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let flat = skills_dir.join("meta-git.md");
+        fs::write(&flat, "custom flat skill").unwrap();
+
+        install_claude_integration_to(dir.path(), false, false, false).unwrap();
+
+        assert_eq!(fs::read_to_string(&flat).unwrap(), "custom flat skill");
+        assert!(skills_dir.join("meta-git").join("SKILL.md").exists());
     }
 
     #[test]
