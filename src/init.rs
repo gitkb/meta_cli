@@ -519,7 +519,10 @@ mod tests {
         assert!(skills_dir.exists());
         for (name, _) in SKILLS {
             let skill = fs::read_to_string(skills_dir.join(name).join("SKILL.md")).unwrap();
-            assert!(skill.starts_with(&format!("---\nname: {name}\ndescription: ")));
+            let mut lines = skill.lines();
+            assert_eq!(lines.next(), Some("---"));
+            assert_eq!(lines.next(), Some(format!("name: {name}").as_str()));
+            assert!(lines.next().is_some_and(|l| l.starts_with("description: ")));
         }
 
         // Rules should exist
