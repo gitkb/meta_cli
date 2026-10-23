@@ -495,6 +495,8 @@ fn main() -> Result<()> {
         }
         Some(Commands::Init(args)) => {
             let cmd = match args.command {
+                // `--help` must only print help, never install
+                _ if cli.help => init::InitCommand::None,
                 None => init::InitCommand::None,
                 Some(InitCommands::Claude { force, update }) => {
                     init::InitCommand::Claude { force, update }
