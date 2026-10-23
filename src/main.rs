@@ -755,7 +755,7 @@ fn handle_command_dispatch(
                     spawn_stagger_ms: 0,
                     env: None,
                     max_parallel: None,
-                    root_dir: None, // Worktree paths don't use "." convention
+                    root_dir: Some(task_dir.clone()),
                 };
 
                 // Try plugin dispatch first (full feature parity with normal path)
@@ -821,7 +821,7 @@ fn handle_command_dispatch(
                 spawn_stagger_ms: 0,
                 env: None,
                 max_parallel: None,
-                root_dir: None, // Worktree paths don't use "." convention
+                root_dir: Some(task_dir.clone()),
             };
 
             run(&config, &command_str)?;
