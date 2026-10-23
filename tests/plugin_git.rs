@@ -512,3 +512,35 @@ fn test_meta_dry_run_flag() {
     assert!(!marker_file.exists(), "--dry-run should NOT create file");
 }
 */
+
+/// A malformed selected worktree must fail before ordinary config fallback or exec.
+#[cfg(unix)]
+#[test]
+fn malformed_worktree_membership_is_reported_before_dispatch() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    let worktree = root.join(".worktrees/broken");
+    fs::create_dir_all(&worktree).unwrap();
+    fs::write(root.join(".meta"), r#"{"projects":{}}"#).unwrap();
+    fs::write(worktree.join(".meta"), r#"{"projects":{}}"#).unwrap();
+    fs::write(worktree.join(".git"), "malformed metadata").unwrap();
+    let marker = root.join("unexpected-dispatch");
+    let output = std::process::Command::new(env!("CARGO_BIN_EXE_meta"))
+        .args(["exec", "--", "/usr/bin/touch", marker.to_str().unwrap()])
+        .current_dir(&worktree)
+        .env("HOME", &root)
+        .env("META_DATA_DIR", root.join("data"))
+        .env("PATH", "/usr/bin:/bin")
+        .output()
+        .unwrap();
+    assert!(!output.status.success());
+    assert!(
+        String::from_utf8_lossy(&output.stderr).contains("Invalid .git file format"),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(
+        !marker.exists(),
+        "invalid worktree dispatched through ordinary config fallback"
+    );
+}

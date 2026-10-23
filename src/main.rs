@@ -672,9 +672,16 @@ fn handle_command_dispatch(
 
     // Context detection: if cwd is inside a worktree, auto-scope to its repos
     if !cli.primary {
-        if let Some((task_name, task_dir, wt_paths)) =
-            worktree::detect_worktree_context(&current_dir)
-        {
+        let context = if let Some((name, root)) = worktree::detect_worktree_location(&current_dir) {
+            let paths: Vec<_> = worktree::discover_worktree_members(&root)?
+                .into_iter()
+                .map(|member| member.path)
+                .collect();
+            (!paths.is_empty()).then_some((name, root, paths))
+        } else {
+            None
+        };
+        if let Some((task_name, task_dir, wt_paths)) = context {
             if cli.verbose {
                 eprintln!(
                     "Detected worktree context: '{}' ({} repos)",
