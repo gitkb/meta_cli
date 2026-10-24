@@ -85,6 +85,17 @@ const AGENT_SKILL_DIRS: &[AgentDir] = &[
     },
 ];
 
+/// First lines of every flat `.claude/skills/<name>.md` file older releases wrote
+const FLAT_SKILL_HEADINGS: &[&str] = &[
+    "# Meta Workspace Skill",
+    "# Meta Git Skill",
+    "# Meta Git Operations Skill",
+    "# Meta Exec Skill",
+    "# Meta Plugins Skill",
+    "# Meta Worktree Skill",
+    "# Meta Safety Skill",
+];
+
 /// Embedded rule files (always-loaded, survive compaction)
 const RULE_WORKSPACE_DISCIPLINE: &str =
     include_str!("../.claude/rules/meta-workspace-discipline.md");
@@ -176,13 +187,6 @@ fn install_claude_integration_to(
         println!();
     }
 
-    // Like skills, rules are never written through a symlink
-    let rules_link = symlink_in(target_dir, Path::new(".claude/rules"));
-    if rules_link.is_none() {
-        fs::create_dir_all(&rules_dir)
-            .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
-    }
-
     let mut merged = false;
 
     // --force or --update: overwrite; default: skip existing
@@ -198,8 +202,16 @@ fn install_claude_integration_to(
     let mut installed = skills.written;
     let mut skipped = skills.skipped;
 
+    // Like skills, rules are never written through a symlink
+    let rules_link = symlink_in(target_dir, Path::new(".claude/rules"));
+    if rules_link.is_none() {
+        fs::create_dir_all(&rules_dir)
+            .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
+    }
+
     // Older releases wrote flat `<name>.md` files, which Claude Code does not load.
-    // Like other existing files, they are only removed with --update or --force.
+    // Like other existing files, they are only removed with --update or --force,
+    // and only when they start with the heading of a skill meta shipped.
     let skills_dir_linked = symlink_in(target_dir, Path::new(".claude/skills")).is_some();
     for (name, _) in SKILLS {
         if skills_dir_linked {
@@ -207,7 +219,20 @@ fn install_claude_integration_to(
         }
         let flat_path = skills_dir.join(format!("{name}.md"));
         let is_file = fs::symlink_metadata(&flat_path).is_ok_and(|m| m.is_file());
-        if overwrite_content && is_file {
+        let shipped = is_file
+            && fs::read_to_string(&flat_path).is_ok_and(|text| {
+                text.lines()
+                    .next()
+                    .is_some_and(|l| FLAT_SKILL_HEADINGS.contains(&l))
+            });
+        if overwrite_content && is_file && !shipped {
+            println!(
+                "{} {} (not created by meta, left alone)",
+                "Skipped".yellow(),
+                flat_path.display()
+            );
+            skipped += 1;
+        } else if overwrite_content && shipped {
             fs::remove_file(&flat_path)
                 .with_context(|| format!("Failed to remove {}", flat_path.display()))?;
             if verbose {
@@ -1028,8 +1053,17 @@ mod tests {
 
         let skills_dir = dir.path().join(".claude").join("skills");
         fs::create_dir_all(&skills_dir).unwrap();
-        for (name, _) in SKILLS {
-            fs::write(skills_dir.join(format!("{name}.md")), "old flat skill").unwrap();
+        let headings = [
+            "# Meta Workspace Skill",
+            "# Meta Git Operations Skill",
+            "# Meta Exec Skill",
+            "# Meta Plugins Skill",
+            "# Meta Worktree Skill",
+            "# Meta Safety Skill",
+        ];
+        for ((name, _), heading) in SKILLS.iter().zip(headings) {
+            let old = format!("{heading}\nold flat skill");
+            fs::write(skills_dir.join(format!("{name}.md")), old).unwrap();
         }
         let unrelated = skills_dir.join("my-skill.md");
         fs::write(&unrelated, "not ours").unwrap();
@@ -1171,6 +1205,23 @@ mod tests {
                 "mine"
             );
             assert_linked(dir.path(), ".claude/skills", "meta-safety");
+        }
+    }
+
+    #[test]
+    fn test_update_keeps_flat_files_meta_did_not_ship() {
+        let dir = tempdir().unwrap();
+        let skills_dir = dir.path().join(".claude/skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let other = skills_dir.join("meta-git.md");
+        // Another tool's file, and what git checks another tool's link out as
+        fs::write(&other, "# Another tool\n").unwrap();
+        fs::write(skills_dir.join("meta-exec.md"), "../../.other/meta-exec.md").unwrap();
+
+        for (force, update) in [(false, true), (true, false)] {
+            install_claude_integration_to(dir.path(), force, update, false).unwrap();
+            assert_eq!(fs::read_to_string(&other).unwrap(), "# Another tool\n");
+            assert!(skills_dir.join("meta-exec.md").is_file());
         }
     }
 
