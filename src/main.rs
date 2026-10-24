@@ -526,7 +526,7 @@ fn main() -> Result<()> {
                 println!();
                 println!("Examples:");
                 println!("  meta exec -- npm install");
-                println!("  meta exec -- git fetch --all");
+                println!("  meta exec -- cargo fmt --check");
                 println!("  meta exec -- make clean");
                 println!("  meta exec --include api,web -- docker-compose up -d");
                 std::process::exit(0);

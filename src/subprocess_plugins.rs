@@ -760,8 +760,8 @@ mod tests {
             routed(&manager, &["cargo", "build", "--release"]),
             Some(("rust".to_string(), 2))
         );
-        // Words match whole: "buildx" is not "build", so the namespace owner
-        // gets the whole command
+        // Unclaimed subcommands go whole to the namespace owner; words match
+        // whole, so "buildx" is not "build"
         assert_eq!(
             routed(&manager, &["cargo", "--version"]),
             Some(("rust".to_string(), 2))
