@@ -257,6 +257,13 @@ fn install_claude_integration_to(
             );
         }
         skipped += 1;
+    } else if let Some(link) = symlink_in(target_dir, Path::new(".claude/settings.json")) {
+        println!(
+            "{} .claude/settings.json (reached through the symlink {}, not followed)",
+            "Skipped".yellow(),
+            link.display()
+        );
+        skipped += 1;
     } else {
         let result = install_settings(&settings_path, force, verbose)?;
         match result {
@@ -1205,6 +1212,34 @@ mod tests {
             .path()
             .join(".claude/rules/meta-destructive-commands.md");
         assert!(fs::read_to_string(other_rule).unwrap().contains("# "));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_never_writes_settings_through_symlinks() {
+        let dir = tempdir().unwrap();
+        let other = dir.path().join(".other/settings.json");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, r#"{"other": true}"#).unwrap();
+
+        // A linked settings file
+        fs::create_dir_all(dir.path().join(".claude")).unwrap();
+        symlink_dir(
+            "../.other/settings.json",
+            dir.path().join(".claude/settings.json"),
+        )
+        .unwrap();
+        for force in [false, true] {
+            install_claude_integration_to(dir.path(), force, false, false).unwrap();
+            assert_eq!(fs::read_to_string(&other).unwrap(), r#"{"other": true}"#);
+        }
+
+        // A linked .claude folder: nothing is written through it
+        let linked = tempdir().unwrap();
+        symlink_dir(dir.path().join(".other"), linked.path().join(".claude")).unwrap();
+        install_claude_integration_to(linked.path(), true, false, false).unwrap();
+        assert_eq!(fs::read_to_string(&other).unwrap(), r#"{"other": true}"#);
+        assert_eq!(fs::read_dir(dir.path().join(".other")).unwrap().count(), 1);
     }
 
     #[test]
