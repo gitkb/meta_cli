@@ -41,8 +41,8 @@ struct AgentDir {
     path: &'static str,
     /// Always linked; otherwise only when the agent's folder (e.g. `.cursor/`) exists
     always: bool,
-    /// Older releases wrote real skill folders here, so a folder holding only
-    /// `SKILL.md` is the tool's own
+    /// Older releases wrote real skill folders here, so a folder holding only a
+    /// `SKILL.md` identical to the shipped one is the tool's own
     legacy: bool,
 }
 
@@ -176,8 +176,12 @@ fn install_claude_integration_to(
         println!();
     }
 
-    fs::create_dir_all(&rules_dir)
-        .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
+    // Like skills, rules are never written through a symlink
+    let rules_link = symlink_in(target_dir, Path::new(".claude/rules"));
+    if rules_link.is_none() {
+        fs::create_dir_all(&rules_dir)
+            .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
+    }
 
     let mut merged = false;
 
@@ -216,6 +220,17 @@ fn install_claude_integration_to(
     // --force or --update: overwrite; default: skip existing
     for (filename, content) in RULES {
         let target_path = rules_dir.join(filename);
+        let rel = Path::new(".claude/rules").join(filename);
+        if let Some(link) = rules_link.clone().or_else(|| symlink_in(target_dir, &rel)) {
+            println!(
+                "{} {} (reached through the symlink {}, not followed)",
+                "Skipped".yellow(),
+                rel.display(),
+                link.display()
+            );
+            skipped += 1;
+            continue;
+        }
 
         if target_path.exists() && !overwrite_content {
             if verbose {
@@ -347,7 +362,7 @@ enum SkillEntry {
     /// The tool's own link
     Linked,
     /// Something the tool wrote that is not its link: a marked copy, a legacy
-    /// folder (only `SKILL.md`, in a `legacy` agent folder), or the plain file git
+    /// folder (only the shipped `SKILL.md`, in a `legacy` agent folder), or the plain file git
     /// checks the link out as with `core.symlinks=false`
     Owned,
     /// Anything else belongs to the user or another tool
@@ -441,10 +456,11 @@ fn install_skills_with(
 
         // One `..` per folder in `agent_dir`
         let up: PathBuf = agent_dir.components().map(|_| "..").collect();
-        for (name, _) in skills {
+        for (name, content) in skills {
             let link = skills_dir.join(name);
             let target = up.join(&tool_dir).join(name);
-            match skill_entry(&link, &target, &marker, agent.legacy) {
+            let legacy = agent.legacy.then_some(*content);
+            match skill_entry(&link, &target, &marker, legacy) {
                 SkillEntry::Missing => {}
                 SkillEntry::Linked => continue,
                 SkillEntry::Owned if overwrite => remove_owned(&link, &marker)?,
@@ -508,8 +524,9 @@ fn symlink_in(root: &Path, rel: &Path) -> Option<PathBuf> {
     None
 }
 
-/// Classify the entry at `link` without following it.
-fn skill_entry(link: &Path, target: &Path, marker: &str, legacy: bool) -> SkillEntry {
+/// Classify the entry at `link` without following it. `legacy` is the shipped
+/// `SKILL.md` when older releases wrote real folders into this agent folder.
+fn skill_entry(link: &Path, target: &Path, marker: &str, legacy: Option<&str>) -> SkillEntry {
     let Ok(meta) = fs::symlink_metadata(link) else {
         return SkillEntry::Missing;
     };
@@ -541,7 +558,8 @@ fn skill_entry(link: &Path, target: &Path, marker: &str, legacy: bool) -> SkillE
         names.push(entry.file_name());
     }
     names.sort();
-    if names == [marker, "SKILL.md"] || (legacy && names == ["SKILL.md"]) {
+    let shipped = |text: &str| fs::read_to_string(link.join("SKILL.md")).is_ok_and(|t| t == text);
+    if names == [marker, "SKILL.md"] || (names == ["SKILL.md"] && legacy.is_some_and(shipped)) {
         SkillEntry::Owned
     } else {
         SkillEntry::Foreign
@@ -911,13 +929,13 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let claude_dir = dir.path().join(".claude");
-        let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(skills_dir.join("meta-workspace")).unwrap();
+        let meta_skill_dir = dir.path().join(".meta/skills/meta-workspace");
+        fs::create_dir_all(&meta_skill_dir).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
         // Create existing files with different content
-        let existing_skill = skills_dir.join("meta-workspace").join("SKILL.md");
+        let existing_skill = meta_skill_dir.join("SKILL.md");
         fs::write(&existing_skill, "custom content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
@@ -950,13 +968,13 @@ mod tests {
         let dir = tempdir().unwrap();
 
         let claude_dir = dir.path().join(".claude");
-        let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(skills_dir.join("meta-workspace")).unwrap();
+        let meta_skill_dir = dir.path().join(".meta/skills/meta-workspace");
+        fs::create_dir_all(&meta_skill_dir).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
         // Create existing files
-        let existing_skill = skills_dir.join("meta-workspace").join("SKILL.md");
+        let existing_skill = meta_skill_dir.join("SKILL.md");
         fs::write(&existing_skill, "old skill content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
@@ -1083,16 +1101,17 @@ mod tests {
         let dir = tempdir().unwrap();
         let skills_dir = dir.path().join(".claude/skills");
         // The layout meta wrote before links: real folders in .claude/skills/
-        for (name, _) in SKILLS {
+        for (name, content) in SKILLS {
             fs::create_dir_all(skills_dir.join(name)).unwrap();
-            fs::write(skills_dir.join(name).join("SKILL.md"), "old skill").unwrap();
+            fs::write(skills_dir.join(name).join("SKILL.md"), content).unwrap();
         }
 
         // Without --update they are kept
         install_claude_integration_to(dir.path(), false, false, false).unwrap();
         for (name, _) in SKILLS {
-            let skill = skills_dir.join(name).join("SKILL.md");
-            assert_eq!(fs::read_to_string(skill).unwrap(), "old skill");
+            assert!(!fs::symlink_metadata(skills_dir.join(name))
+                .unwrap()
+                .is_symlink());
             assert_linked(dir.path(), ".agents/skills", name);
         }
 
@@ -1146,6 +1165,46 @@ mod tests {
             );
             assert_linked(dir.path(), ".claude/skills", "meta-safety");
         }
+    }
+
+    #[test]
+    fn test_update_keeps_skill_folders_meta_did_not_ship() {
+        let dir = tempdir().unwrap();
+        // Same name and layout as an old meta folder, but not meta's text
+        let other = dir.path().join(".claude/skills/meta-git");
+        fs::create_dir_all(&other).unwrap();
+        fs::write(other.join("SKILL.md"), "another tool").unwrap();
+
+        for (force, update) in [(false, true), (true, false)] {
+            install_claude_integration_to(dir.path(), force, update, false).unwrap();
+            assert_eq!(
+                fs::read_to_string(other.join("SKILL.md")).unwrap(),
+                "another tool"
+            );
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_never_writes_rules_through_symlinks() {
+        let dir = tempdir().unwrap();
+        let other = dir.path().join(".other/SKILL.md");
+        fs::create_dir_all(other.parent().unwrap()).unwrap();
+        fs::write(&other, "other tool").unwrap();
+        fs::create_dir_all(dir.path().join(".claude/rules")).unwrap();
+        let rule = dir
+            .path()
+            .join(".claude/rules/meta-workspace-discipline.md");
+        symlink_dir("../../.other/SKILL.md", &rule).unwrap();
+
+        install_claude_integration_to(dir.path(), false, true, false).unwrap();
+
+        assert_eq!(fs::read_to_string(&other).unwrap(), "other tool");
+        assert!(fs::symlink_metadata(&rule).unwrap().is_symlink());
+        let other_rule = dir
+            .path()
+            .join(".claude/rules/meta-destructive-commands.md");
+        assert!(fs::read_to_string(other_rule).unwrap().contains("# "));
     }
 
     #[test]
