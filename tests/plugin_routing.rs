@@ -43,7 +43,11 @@ fn meta(root: &Path, args: &[&str]) {
         .env("META_DATA_DIR", root.join("data"))
         .env(
             "PATH",
-            format!("{}:/usr/bin:/bin", root.join("bin").display()),
+            std::env::join_paths(
+                std::iter::once(root.join("bin"))
+                    .chain(std::env::split_paths(&std::env::var_os("PATH").unwrap())),
+            )
+            .unwrap(),
         )
         .output()
         .unwrap();

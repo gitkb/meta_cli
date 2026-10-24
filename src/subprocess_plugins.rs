@@ -235,7 +235,7 @@ impl SubprocessPluginManager {
         let command = command.join(" ");
 
         let request = PluginRequest {
-            command: command.clone(),
+            command,
             args: remaining_args.to_vec(),
             projects: projects.to_vec(),
             cwd: std::env::current_dir()?.to_string_lossy().to_string(),
@@ -247,7 +247,7 @@ impl SubprocessPluginManager {
         if self.verbose {
             println!(
                 "Executing plugin {} for command '{}'",
-                plugin.info.name, command
+                plugin.info.name, request.command
             );
         }
 
@@ -762,6 +762,10 @@ mod tests {
         );
         // Words match whole: "buildx" is not "build", so the namespace owner
         // gets the whole command
+        assert_eq!(
+            routed(&manager, &["cargo", "--version"]),
+            Some(("rust".to_string(), 2))
+        );
         assert_eq!(
             routed(&manager, &["cargo", "buildx", "x"]),
             Some(("rust".to_string(), 3))

@@ -592,7 +592,7 @@ fn main() -> Result<()> {
 ///
 /// `meta exec` (is_explicit_exec=true) runs the command as typed and never
 /// offers it to plugins, so a plugin's claimed command (e.g. meta-rust's
-/// `cargo build`) cannot shadow a raw one. External subcommands
+/// `cargo`) cannot shadow a raw one. External subcommands
 /// (is_explicit_exec=false, e.g. `meta git status`) go to the plugin that owns
 /// them, or fail as unrecognized.
 fn handle_command_dispatch(
