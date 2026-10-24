@@ -521,8 +521,8 @@ fn main() -> Result<()> {
                 println!("Arguments:");
                 println!("  <COMMAND>...    Command and arguments to run");
                 println!();
-                println!("The command runs in each project directory defined in .meta.");
-                println!("Use this for any command not explicitly handled by a plugin.");
+                println!("The command runs as typed in each project directory defined in .meta,");
+                println!("never through a plugin (use `meta git ...` for the git plugin).");
                 println!();
                 println!("Examples:");
                 println!("  meta exec -- npm install");
@@ -564,7 +564,6 @@ fn main() -> Result<()> {
                 }
 
                 if wants_help {
-                    let command_str = args.join(" ");
                     let options = PluginRequestOptions {
                         json_output: cli.json,
                         verbose: cli.verbose,
@@ -577,7 +576,7 @@ fn main() -> Result<()> {
                         exclude_filters: cli.exclude.clone(),
                         strict: cli.strict,
                     };
-                    if subprocess_plugins.execute(&command_str, &args, &[], None, options)? {
+                    if subprocess_plugins.execute(&args, &[], None, options)? {
                         return Ok(());
                     }
                 }
@@ -589,10 +588,13 @@ fn main() -> Result<()> {
 
 // === Command Dispatch (shared by exec and external) ===
 
-/// Dispatch a command to plugins or loop execution.
+/// Run a command across the selected repos.
 ///
-/// Used by both `meta exec` (is_explicit_exec=true) and external subcommands
-/// (is_explicit_exec=false).
+/// `meta exec` (is_explicit_exec=true) runs the command as typed and never
+/// offers it to plugins, so a plugin's claimed command (e.g. meta-rust's
+/// `cargo build`) cannot shadow a raw one. External subcommands
+/// (is_explicit_exec=false, e.g. `meta git status`) go to the plugin that owns
+/// them, or fail as unrecognized.
 fn handle_command_dispatch(
     command_args: Vec<String>,
     cli: &Cli,
@@ -643,7 +645,7 @@ fn handle_command_dispatch(
     let is_git_clone = command_args.first().map(|s| s == "git").unwrap_or(false)
         && command_args.get(1).map(|s| s == "clone").unwrap_or(false);
 
-    if is_git_clone {
+    if is_git_clone && !is_explicit_exec {
         // Handle git clone directly via plugin without requiring .meta file
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
@@ -658,7 +660,7 @@ fn handle_command_dispatch(
             strict: cli.strict,
         };
 
-        if plugins.execute("git clone", &command_args, &[], None, subprocess_options)? {
+        if plugins.execute(&command_args, &[], None, subprocess_options)? {
             if cli.verbose {
                 println!("{}", "Git clone handled by subprocess plugin.".green());
             }
@@ -760,7 +762,7 @@ fn handle_command_dispatch(
                     root_dir: Some(task_dir.clone()),
                 };
 
-                // Try plugin dispatch first (full feature parity with normal path)
+                // Plugin dispatch (full feature parity with normal path)
                 let subprocess_options = PluginRequestOptions {
                     json_output: cli.json,
                     verbose: cli.verbose,
@@ -774,8 +776,9 @@ fn handle_command_dispatch(
                     strict: cli.strict,
                 };
 
-                if plugins.execute(
-                    &command_str,
+                if is_explicit_exec {
+                    run(&config, &command_str)?;
+                } else if plugins.execute(
                     &command_args,
                     &wt_directories,
                     Some(&task_dir),
@@ -787,8 +790,6 @@ fn handle_command_dispatch(
                             "Command handled by subprocess plugin (worktree).".green()
                         );
                     }
-                } else if is_explicit_exec {
-                    run(&config, &command_str)?;
                 } else {
                     unrecognized_command_error(&command_args, &command_str, plugins);
                 }
@@ -916,7 +917,7 @@ fn handle_command_dispatch(
         root_dir: Some(meta_dir.to_path_buf()),
     };
 
-    // Try subprocess plugins first (preferred)
+    // Plugin dispatch for external subcommands
     let subprocess_options = PluginRequestOptions {
         json_output: cli.json,
         verbose: cli.verbose,
@@ -930,8 +931,14 @@ fn handle_command_dispatch(
         strict: cli.strict,
     };
 
-    if plugins.execute(
-        &command_str,
+    if is_explicit_exec {
+        // User explicitly requested exec, run the command in all repos
+        log::info!("Explicit exec requested, running command via loop");
+        if cli.verbose {
+            println!("{}", "Running command via loop (explicit exec).".green());
+        }
+        run(&config, &command_str)?;
+    } else if plugins.execute(
         &command_args,
         &project_paths,
         Some(meta_dir),
@@ -941,13 +948,6 @@ fn handle_command_dispatch(
         if cli.verbose {
             println!("{}", "Command handled by subprocess plugin.".green());
         }
-    } else if is_explicit_exec {
-        // User explicitly requested exec, run the command in all repos
-        log::info!("Explicit exec requested, running command via loop");
-        if cli.verbose {
-            println!("{}", "Running command via loop (explicit exec).".green());
-        }
-        run(&config, &command_str)?;
     } else {
         unrecognized_command_error(&command_args, &command_str, plugins);
     }
