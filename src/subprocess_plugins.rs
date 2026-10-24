@@ -763,8 +763,8 @@ mod tests {
         // Words match whole: "buildx" is not "build", so the namespace owner
         // gets the whole command
         assert_eq!(
-            routed(&manager, &["cargo", "buildx"]),
-            Some(("rust".to_string(), 2))
+            routed(&manager, &["cargo", "buildx", "x"]),
+            Some(("rust".to_string(), 3))
         );
         assert_eq!(routed(&manager, &["gitx", "status"]), None);
         assert_eq!(routed(&manager, &["npm", "install"]), None);
