@@ -10,29 +10,31 @@ use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::Path;
 
-/// Embedded skill files from the meta repository
-const SKILL_META_WORKSPACE: &str = include_str!("../.claude/skills/meta-workspace.md");
-const SKILL_META_GIT: &str = include_str!("../.claude/skills/meta-git.md");
-const SKILL_META_EXEC: &str = include_str!("../.claude/skills/meta-exec.md");
-const SKILL_META_PLUGINS: &str = include_str!("../.claude/skills/meta-plugins.md");
-const SKILL_META_WORKTREE: &str = include_str!("../.claude/skills/meta-worktree.md");
-const SKILL_META_SAFETY: &str = include_str!("../.claude/skills/meta-safety.md");
+/// Embeds `.claude/skills/<name>/SKILL.md`, installed at the same path
+macro_rules! skill {
+    ($name:literal) => {
+        (
+            $name,
+            include_str!(concat!("../.claude/skills/", $name, "/SKILL.md")),
+        )
+    };
+}
+
+/// All available skills with their names
+const SKILLS: &[(&str, &str)] = &[
+    skill!("meta-workspace"),
+    skill!("meta-git"),
+    skill!("meta-exec"),
+    skill!("meta-plugins"),
+    skill!("meta-worktree"),
+    skill!("meta-safety"),
+];
 
 /// Embedded rule files (always-loaded, survive compaction)
 const RULE_WORKSPACE_DISCIPLINE: &str =
     include_str!("../.claude/rules/meta-workspace-discipline.md");
 const RULE_DESTRUCTIVE_COMMANDS: &str =
     include_str!("../.claude/rules/meta-destructive-commands.md");
-
-/// All available skills with their filenames
-const SKILLS: &[(&str, &str)] = &[
-    ("meta-workspace.md", SKILL_META_WORKSPACE),
-    ("meta-git.md", SKILL_META_GIT),
-    ("meta-exec.md", SKILL_META_EXEC),
-    ("meta-plugins.md", SKILL_META_PLUGINS),
-    ("meta-worktree.md", SKILL_META_WORKTREE),
-    ("meta-safety.md", SKILL_META_SAFETY),
-];
 
 /// All available rules with their filenames
 const RULES: &[(&str, &str)] = &[
@@ -132,19 +134,33 @@ fn install_claude_integration_to(
     // Install skill files
     // --force or --update: overwrite; default: skip existing
     let overwrite_content = force || update;
-    for (filename, content) in SKILLS {
-        let target_path = skills_dir.join(filename);
+    for (name, content) in SKILLS {
+        let skill_dir = skills_dir.join(name);
+        let target_path = skill_dir.join("SKILL.md");
 
         if target_path.exists() && !overwrite_content {
             if verbose {
-                println!("{} {} (already exists)", "Skipped".yellow(), filename);
+                println!("{} {}/SKILL.md (already exists)", "Skipped".yellow(), name);
             }
             skipped += 1;
             continue;
         }
 
+        fs::create_dir_all(&skill_dir)
+            .with_context(|| format!("Failed to create {}", skill_dir.display()))?;
         write_file(&target_path, content, verbose)?;
         installed += 1;
+
+        // Older releases wrote flat `<name>.md` files, which Claude Code does not load.
+        // Like other existing files, they are only replaced with --update or --force.
+        let flat_path = skills_dir.join(format!("{name}.md"));
+        if overwrite_content && flat_path.exists() {
+            fs::remove_file(&flat_path)
+                .with_context(|| format!("Failed to remove {}", flat_path.display()))?;
+            if verbose {
+                println!("{} {}", "Removed".yellow(), flat_path.display());
+            }
+        }
     }
 
     // Install rule files
@@ -221,7 +237,7 @@ fn install_claude_integration_to(
     if installed > 0 || merged {
         println!();
         println!("Claude Code is now configured for this meta repository:");
-        println!("  Skills:  .claude/skills/ ({} skill files)", SKILLS.len());
+        println!("  Skills:  .claude/skills/ ({} skills)", SKILLS.len());
         println!("  Rules:   .claude/rules/ ({} rule files)", RULES.len());
         println!("  Hooks:   .claude/settings.json (SessionStart, PreToolUse, PreCompact)");
         println!("  Note:    PreToolUse hooks require the standalone agent CLI (`agent guard`).");
@@ -473,11 +489,10 @@ fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
     if verbose {
         println!("{} {}", "Wrote".green(), path.display());
     } else {
-        println!(
-            "  {} {}",
-            "✓".green(),
-            path.file_name().unwrap_or_default().to_string_lossy()
-        );
+        // Show the parent too: every skill file is named SKILL.md.
+        let name = |p: &Path| p.file_name().unwrap_or_default().to_owned();
+        let shown = Path::new(&path.parent().map(name).unwrap_or_default()).join(name(path));
+        println!("  {} {}", "✓".green(), shown.display());
     }
 
     Ok(())
@@ -503,12 +518,13 @@ mod tests {
 
         // Skills should exist
         assert!(skills_dir.exists());
-        assert!(skills_dir.join("meta-workspace.md").exists());
-        assert!(skills_dir.join("meta-git.md").exists());
-        assert!(skills_dir.join("meta-exec.md").exists());
-        assert!(skills_dir.join("meta-plugins.md").exists());
-        assert!(skills_dir.join("meta-worktree.md").exists());
-        assert!(skills_dir.join("meta-safety.md").exists());
+        for (name, _) in SKILLS {
+            let skill = fs::read_to_string(skills_dir.join(name).join("SKILL.md")).unwrap();
+            let mut lines = skill.lines();
+            assert_eq!(lines.next(), Some("---"));
+            assert_eq!(lines.next(), Some(format!("name: {name}").as_str()));
+            assert!(lines.next().is_some_and(|l| l.starts_with("description: ")));
+        }
 
         // Rules should exist
         assert!(rules_dir.exists());
@@ -534,11 +550,11 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(&skills_dir).unwrap();
+        fs::create_dir_all(skills_dir.join("meta-workspace")).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
         // Create existing skill file
-        let existing_skill = skills_dir.join("meta-workspace.md");
+        let existing_skill = skills_dir.join("meta-workspace").join("SKILL.md");
         fs::write(&existing_skill, "custom content").unwrap();
 
         // Create existing rule file
@@ -575,11 +591,11 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(&skills_dir).unwrap();
+        fs::create_dir_all(skills_dir.join("meta-workspace")).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
         // Create existing files with different content
-        let existing_skill = skills_dir.join("meta-workspace.md");
+        let existing_skill = skills_dir.join("meta-workspace").join("SKILL.md");
         fs::write(&existing_skill, "custom content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
@@ -614,11 +630,11 @@ mod tests {
         let claude_dir = dir.path().join(".claude");
         let skills_dir = claude_dir.join("skills");
         let rules_dir = claude_dir.join("rules");
-        fs::create_dir_all(&skills_dir).unwrap();
+        fs::create_dir_all(skills_dir.join("meta-workspace")).unwrap();
         fs::create_dir_all(&rules_dir).unwrap();
 
         // Create existing files
-        let existing_skill = skills_dir.join("meta-workspace.md");
+        let existing_skill = skills_dir.join("meta-workspace").join("SKILL.md");
         fs::write(&existing_skill, "old skill content").unwrap();
 
         let existing_rule = rules_dir.join("meta-workspace-discipline.md");
@@ -657,6 +673,42 @@ mod tests {
             !settings_content.contains("SessionStart"),
             "meta hooks should NOT be added"
         );
+    }
+
+    #[test]
+    fn test_update_replaces_flat_skill_files() {
+        let dir = tempdir().unwrap();
+
+        let skills_dir = dir.path().join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        for (name, _) in SKILLS {
+            fs::write(skills_dir.join(format!("{name}.md")), "old flat skill").unwrap();
+        }
+        let unrelated = skills_dir.join("my-skill.md");
+        fs::write(&unrelated, "not ours").unwrap();
+
+        install_claude_integration_to(dir.path(), false, true, false).unwrap();
+
+        for (name, _) in SKILLS {
+            assert!(!skills_dir.join(format!("{name}.md")).exists());
+            assert!(skills_dir.join(name).join("SKILL.md").exists());
+        }
+        assert_eq!(fs::read_to_string(&unrelated).unwrap(), "not ours");
+    }
+
+    #[test]
+    fn test_default_install_keeps_flat_skill_files() {
+        let dir = tempdir().unwrap();
+
+        let skills_dir = dir.path().join(".claude").join("skills");
+        fs::create_dir_all(&skills_dir).unwrap();
+        let flat = skills_dir.join("meta-git.md");
+        fs::write(&flat, "custom flat skill").unwrap();
+
+        install_claude_integration_to(dir.path(), false, false, false).unwrap();
+
+        assert_eq!(fs::read_to_string(&flat).unwrap(), "custom flat skill");
+        assert!(skills_dir.join("meta-git").join("SKILL.md").exists());
     }
 
     #[test]
