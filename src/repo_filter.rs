@@ -9,7 +9,7 @@ use std::path::{Component, Path};
 pub fn repo_names(projects: &[ProjectInfo], tree: &[MetaTreeNode]) -> Vec<(String, String)> {
     fn walk(nodes: &[MetaTreeNode], prefix: &str, out: &mut Vec<(String, String)>) {
         for node in nodes {
-            let path = normalize(&format!("{prefix}/{}", node.info.path));
+            let path = normalize(&Path::new(prefix).join(&node.info.path).to_string_lossy());
             out.push((node.info.name.clone(), path.clone()));
             walk(&node.children, &path, out);
         }
@@ -204,6 +204,29 @@ mod tests {
             ("api", "api"),
             ("outer", "libs/../api"),
         ] {
+            let chosen = select(&strings(&[value]), &[], &dirs, &root, &names).unwrap();
+            assert_eq!(chosen, [root.join(rel).display().to_string()], "{value}");
+        }
+    }
+
+    #[test]
+    fn names_from_the_tree_match_nested_and_top_level_repos() {
+        let root = std::env::temp_dir().join("ws").join("a");
+        let dirs: Vec<String> = ["", "parent", "parent/libs/core"]
+            .iter()
+            .map(|rel| root.join(rel).display().to_string())
+            .collect();
+        let node = |info: ProjectInfo, children| MetaTreeNode {
+            info,
+            is_meta: true,
+            children,
+        };
+        let tree = [node(
+            project("top", "parent"),
+            vec![node(project("core-lib", "./libs/core"), vec![])],
+        )];
+        let names = repo_names(&[], &tree);
+        for (value, rel) in [("top", "parent"), ("core-lib", "parent/libs/core")] {
             let chosen = select(&strings(&[value]), &[], &dirs, &root, &names).unwrap();
             assert_eq!(chosen, [root.join(rel).display().to_string()], "{value}");
         }
