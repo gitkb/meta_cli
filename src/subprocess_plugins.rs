@@ -4,6 +4,7 @@
 //! This approach provides better isolation, language flexibility, and simpler debugging.
 
 use anyhow::{Context, Result};
+use meta_core::display::{escape, escape_lines, escape_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -56,7 +57,10 @@ impl SubprocessPluginManager {
         // mark it visited to keep that walk from running what it holds.
         let global_plugins = meta_core::data_dir::data_subdir("plugins");
         if let Err(e) = &global_plugins {
-            eprintln!("warning: skipping global plugins: {e:#}");
+            eprintln!(
+                "warning: skipping global plugins: {}",
+                escape_lines(&format!("{e:#}"))
+            );
             if let Ok(dir) = meta_core::meta_dir() {
                 let refused = dir.join("plugins");
                 visited.insert(refused.canonicalize().unwrap_or(refused));
@@ -105,7 +109,7 @@ impl SubprocessPluginManager {
     /// Scan a .meta-plugins directory for plugin executables
     fn scan_directory(&mut self, dir: &Path) -> Result<()> {
         if self.verbose {
-            println!("Scanning for subprocess plugins in: {}", dir.display());
+            println!("Scanning for subprocess plugins in: {}", escape_path(dir));
         }
 
         for entry in std::fs::read_dir(dir)? {
@@ -166,9 +170,9 @@ impl SubprocessPluginManager {
                 if self.verbose {
                     println!(
                         "  Found plugin: {} v{} ({})",
-                        info.name,
-                        info.version,
-                        path.display()
+                        escape(&info.name),
+                        escape(&info.version),
+                        escape_path(path)
                     );
                 }
 

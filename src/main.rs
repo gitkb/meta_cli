@@ -862,7 +862,7 @@ fn handle_command_dispatch(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".meta / .meta.yaml / .meta.yml".to_string());
             eprintln!("Error: Could not find meta config file '{config_name}'");
-            eprintln!("Searched from {} up to root", current_dir.display());
+            eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
         }
     };
@@ -871,7 +871,7 @@ fn handle_command_dispatch(
 
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
-        println!("Resolved config file path: {}", absolute_path.display());
+        println!("Resolved config file path: {}", escape_path(&absolute_path));
         println!("Executing command: {command_str}");
     }
 
