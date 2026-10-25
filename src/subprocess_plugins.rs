@@ -172,96 +172,71 @@ impl SubprocessPluginManager {
         Ok(())
     }
 
-    /// Check if any plugin handles the given command
-    #[allow(dead_code)]
-    pub fn handles_command(&self, command: &str) -> bool {
-        let cmd_parts: Vec<&str> = command.split_whitespace().collect();
-        if cmd_parts.is_empty() {
-            return false;
-        }
-
-        for plugin in self.plugins.values() {
-            for plugin_cmd in &plugin.info.commands {
-                // Check if the input command starts with this plugin command
-                if command == plugin_cmd || command.starts_with(&format!("{plugin_cmd} ")) {
-                    return true;
-                }
-                // Also check single-word match for fallback
-                if plugin_cmd == cmd_parts[0] {
-                    return true;
-                }
-            }
-        }
-        false
+    /// Find the plugin that owns a command, and how many leading args name it.
+    ///
+    /// `args` is the command as typed after `meta` (e.g. `["git", "status"]`).
+    /// The plugin whose claimed command is the longest whole-word prefix of
+    /// `args` gets it. Otherwise a plugin claiming commands under the first
+    /// word owns that namespace and gets the whole command, and handles
+    /// subcommands it does not implement itself (e.g. meta-git runs raw git).
+    fn route(&self, args: &[String]) -> Option<(&SubprocessPlugin, usize)> {
+        let first = args.first()?;
+        let claims = || {
+            self.plugins.values().flat_map(|plugin| {
+                plugin
+                    .info
+                    .commands
+                    .iter()
+                    .map(move |cmd| (plugin, cmd.split_whitespace().collect::<Vec<_>>()))
+            })
+        };
+        claims()
+            .filter(|(_, words)| {
+                !words.is_empty()
+                    && words.len() <= args.len()
+                    && words.iter().zip(args).all(|(word, arg)| word == arg)
+            })
+            .map(|(plugin, words)| (plugin, words.len()))
+            .max_by_key(|(_, len)| *len)
+            .or_else(|| {
+                claims()
+                    .find(|(_, words)| words.first() == Some(&first.as_str()))
+                    .map(|(plugin, _)| (plugin, args.len()))
+            })
     }
 
-    /// Execute a command via the appropriate plugin
+    /// Execute a command via the plugin that owns it; false if none does.
     pub fn execute(
         &self,
-        command: &str,
         args: &[String],
         projects: &[String],
         root_dir: Option<&Path>,
         options: PluginRequestOptions,
     ) -> Result<bool> {
-        let cmd_parts: Vec<&str> = command.split_whitespace().collect();
-        if cmd_parts.is_empty() {
-            return Ok(false);
-        }
-
-        // Find the best (longest) matching command across all plugins
-        let mut best_match: Option<(&SubprocessPlugin, &str)> = None;
-        let mut best_match_len = 0;
-
-        for plugin in self.plugins.values() {
-            for plugin_cmd in &plugin.info.commands {
-                // Check if the input command starts with this plugin command
-                if command == plugin_cmd || command.starts_with(&format!("{plugin_cmd} ")) {
-                    let cmd_len = plugin_cmd.split_whitespace().count();
-                    if cmd_len > best_match_len {
-                        best_match = Some((plugin, plugin_cmd));
-                        best_match_len = cmd_len;
-                    }
-                }
-                // Also check if the first word of plugin command matches first word of input
-                // This allows "project blablabla" to route to the project plugin
-                else if best_match_len == 0 {
-                    let plugin_cmd_first = plugin_cmd.split_whitespace().next().unwrap_or("");
-                    if plugin_cmd_first == cmd_parts[0] {
-                        // Use the full input command (plugin will handle unknown subcommand)
-                        best_match = Some((plugin, command));
-                        best_match_len = 1;
-                    }
-                }
+        match self.route(args) {
+            Some((plugin, len)) => {
+                self.execute_plugin(plugin, args, len, projects, root_dir, &options)
             }
+            None => Ok(false),
         }
-
-        if let Some((plugin, matched_cmd)) = best_match {
-            return self.execute_plugin(plugin, matched_cmd, args, projects, root_dir, &options);
-        }
-
-        Ok(false)
     }
 
-    /// Execute a specific plugin
+    /// Execute a specific plugin with the first `command_len` args as its command
     fn execute_plugin(
         &self,
         plugin: &SubprocessPlugin,
-        command: &str,
         args: &[String],
+        command_len: usize,
         projects: &[String],
         root_dir: Option<&Path>,
         options: &PluginRequestOptions,
     ) -> Result<bool> {
-        // Extract the remaining args after the matched command
-        // e.g., if command is "git snapshot create" and args is ["git", "snapshot", "create", "test-snapshot"]
-        // then remaining_args should be ["test-snapshot"]
-        let cmd_word_count = command.split_whitespace().count();
-        let remaining_args: Vec<String> = args.iter().skip(cmd_word_count).cloned().collect();
+        let (command, remaining_args) = args.split_at_checked(command_len).unwrap_or((args, &[]));
+        let command = command.join(" ");
 
         let request = PluginRequest {
-            command: command.to_string(),
-            args: remaining_args,
+            command,
+            args: remaining_args.to_vec(),
             projects: projects.to_vec(),
             cwd: std::env::current_dir()?.to_string_lossy().to_string(),
             options: options.clone(),
@@ -272,7 +247,7 @@ impl SubprocessPluginManager {
         if self.verbose {
             println!(
                 "Executing plugin {} for command '{}'",
-                plugin.info.name, command
+                plugin.info.name, request.command
             );
         }
 
@@ -690,13 +665,6 @@ mod tests {
     }
 
     #[test]
-    fn test_handles_command_empty() {
-        let manager = SubprocessPluginManager::new();
-        assert!(!manager.handles_command(""));
-        assert!(!manager.handles_command("git status"));
-    }
-
-    #[test]
     fn test_plugin_info_serialization() {
         let info = PluginInfo {
             name: "test".to_string(),
@@ -751,29 +719,60 @@ mod tests {
         assert!(options.exclude_filters.is_none());
     }
 
+    fn routed(manager: &SubprocessPluginManager, args: &[&str]) -> Option<(String, usize)> {
+        let args: Vec<String> = args.iter().map(|a| a.to_string()).collect();
+        manager
+            .route(&args)
+            .map(|(plugin, len)| (plugin.info.name.clone(), len))
+    }
+
     #[test]
-    fn test_handles_command_matching() {
+    fn test_route_matches_whole_words() {
         let mut manager = SubprocessPluginManager::new();
+        for (name, commands) in [
+            ("rust", vec!["cargo build", "cargo test"]),
+            (
+                "git",
+                vec!["git status", "git snapshot", "git snapshot create"],
+            ),
+        ] {
+            manager.plugins.insert(
+                name.to_string(),
+                SubprocessPlugin {
+                    path: std::path::PathBuf::from(format!("/fake/path/meta-{name}")),
+                    info: PluginInfo {
+                        name: name.to_string(),
+                        version: "1.0.0".to_string(),
+                        commands: commands.into_iter().map(String::from).collect(),
+                        description: None,
+                        help: None,
+                    },
+                },
+            );
+        }
 
-        // Manually add a plugin for testing
-        let plugin = SubprocessPlugin {
-            path: std::path::PathBuf::from("/fake/path/meta-test"),
-            info: PluginInfo {
-                name: "test".to_string(),
-                version: "1.0.0".to_string(),
-                commands: vec!["test".to_string(), "test run".to_string()],
-                description: None,
-                help: None,
-            },
-        };
-        manager.plugins.insert("test".to_string(), plugin);
-
-        // Should match single-word command
-        assert!(manager.handles_command("test"));
-        // Should match two-word command
-        assert!(manager.handles_command("test run"));
-        // Should not match unknown command
-        assert!(!manager.handles_command("unknown"));
+        // The longest claimed command wins; the rest are the plugin's args
+        assert_eq!(
+            routed(&manager, &["git", "snapshot", "create", "x"]),
+            Some(("git".to_string(), 3))
+        );
+        assert_eq!(
+            routed(&manager, &["cargo", "build", "--release"]),
+            Some(("rust".to_string(), 2))
+        );
+        // Unclaimed subcommands go whole to the namespace owner; words match
+        // whole, so "buildx" is not "build"
+        assert_eq!(
+            routed(&manager, &["cargo", "--version"]),
+            Some(("rust".to_string(), 2))
+        );
+        assert_eq!(
+            routed(&manager, &["cargo", "buildx", "x"]),
+            Some(("rust".to_string(), 3))
+        );
+        assert_eq!(routed(&manager, &["gitx", "status"]), None);
+        assert_eq!(routed(&manager, &["npm", "install"]), None);
+        assert_eq!(routed(&manager, &[]), None);
     }
 
     #[test]
