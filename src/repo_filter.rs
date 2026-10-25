@@ -33,7 +33,7 @@ pub fn repo_names(
 /// [`repo_names`]) or by its whole path from `root` (`.` for the root; a
 /// trailing `/` is ignored), never by a part of either. A value starting with
 /// `./` is a path only. Repos are compared as directories, so excluding one
-/// excludes every spelling of it (`api` and `libs/../api`). A value that names
+/// excludes every spelling of it (`api`, `./api` and `api/`). A value that names
 /// none of `dirs` is an error, so a typo never runs a command in a repo it was
 /// meant to leave out; so is a value that names several repos, and a selection
 /// that leaves no repo.
