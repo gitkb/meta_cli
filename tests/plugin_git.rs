@@ -62,8 +62,6 @@ fn test_loop_config_full_serialization_round_trip() {
         verbose: true,
         silent: false,
         add_aliases_to_global_looprc: false,
-        include_filters: Some(vec!["frontend".to_string()]),
-        exclude_filters: Some(vec!["tests".to_string()]),
         parallel: true,
         dry_run: true,
         json_output: true,
@@ -80,8 +78,6 @@ fn test_loop_config_full_serialization_round_trip() {
     assert_eq!(restored.ignore, config.ignore);
     assert_eq!(restored.verbose, config.verbose);
     assert_eq!(restored.silent, config.silent);
-    assert_eq!(restored.include_filters, config.include_filters);
-    assert_eq!(restored.exclude_filters, config.exclude_filters);
     assert_eq!(restored.parallel, config.parallel);
     assert_eq!(restored.dry_run, config.dry_run);
     assert_eq!(restored.json_output, config.json_output);
@@ -281,8 +277,6 @@ fn test_backward_compatibility_config_parsing() {
     assert!(!config.dry_run);
     assert!(!config.json_output);
     assert!(!config.parallel);
-    assert!(config.include_filters.is_none());
-    assert!(config.exclude_filters.is_none());
 }
 
 /*

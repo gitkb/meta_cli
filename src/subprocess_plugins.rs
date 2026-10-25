@@ -324,8 +324,6 @@ impl SubprocessPluginManager {
                 verbose: options.verbose,
                 silent: true, // Pre-commands run silently unless verbose
                 add_aliases_to_global_looprc: false,
-                include_filters: None,
-                exclude_filters: None,
                 parallel: false, // Sequential execution
                 dry_run: false,  // Pre-commands always run (setup is required)
                 json_output: false,
@@ -375,8 +373,6 @@ impl SubprocessPluginManager {
                 verbose: options.verbose,
                 silent: options.silent,
                 add_aliases_to_global_looprc: false,
-                include_filters: options.include_filters.clone(),
-                exclude_filters: options.exclude_filters.clone(),
                 parallel: plan.parallel.unwrap_or(options.parallel),
                 dry_run: options.dry_run,
                 json_output: options.json_output,
@@ -397,8 +393,6 @@ impl SubprocessPluginManager {
                 verbose: options.verbose,
                 silent: true,
                 add_aliases_to_global_looprc: false,
-                include_filters: None,
-                exclude_filters: None,
                 parallel: false,
                 dry_run: false,
                 json_output: false,

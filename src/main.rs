@@ -746,14 +746,19 @@ fn handle_command_dispatch(
                     );
                 }
 
-                let (include_opt, exclude_opt) =
-                    resolve_filters(cli, &wt_directories, &task_dir, config_path.parent())?;
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
+                    // Nested names come from the tree only when no --config
+                    // picked a different file than the walk would find
+                    let tree = match (cli.config.as_ref(), config_path.parent()) {
+                        (None, Some(dir)) => config::walk_meta_tree(dir, None).unwrap_or_default(),
+                        _ => vec![],
+                    };
+                    repo_filter::repo_names(&meta_projects, &tree)
+                })?;
 
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
                     ignore: ignore_list,
-                    include_filters: include_opt.clone(),
-                    exclude_filters: exclude_opt.clone(),
                     verbose: cli.verbose,
                     silent: cli.silent,
                     parallel,
@@ -775,8 +780,8 @@ fn handle_command_dispatch(
                     silent: cli.silent,
                     recursive,
                     depth,
-                    include_filters: include_opt,
-                    exclude_filters: exclude_opt,
+                    include_filters: cli.include.clone(),
+                    exclude_filters: cli.exclude.clone(),
                     strict: cli.strict,
                 };
 
@@ -812,13 +817,11 @@ fn handle_command_dispatch(
             let directories: Vec<String> =
                 wt_paths.iter().map(|p| p.display().to_string()).collect();
 
-            let (include_opt, exclude_opt) = resolve_filters(cli, &directories, &task_dir, None)?;
+            let directories = select_repos(cli, directories, &task_dir, Vec::new)?;
 
             let config = loop_lib::LoopConfig {
                 directories,
                 ignore: vec![],
-                include_filters: include_opt,
-                exclude_filters: exclude_opt,
                 verbose: cli.verbose,
                 silent: cli.silent,
                 parallel, // Use the determined parallel mode, not hardcoded false
@@ -885,12 +888,13 @@ fn handle_command_dispatch(
     );
 
     // If recursive mode is enabled, discover nested meta repos
+    let mut tree = vec![];
     if recursive {
         if cli.verbose {
             let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
             println!("Recursive mode enabled, max depth: {depth_str}");
         }
-        let tree = config::walk_meta_tree(meta_dir, depth)?;
+        tree = config::walk_meta_tree(meta_dir, depth)?;
         project_paths = vec![meta_dir_str.clone()];
         let flat = flatten_with_tag_filter(&tree, &cli.tag);
         project_paths.extend(
@@ -899,16 +903,15 @@ fn handle_command_dispatch(
         );
     }
 
-    // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
-    let (include_opt, exclude_opt) =
-        resolve_filters(cli, &project_paths, meta_dir, Some(meta_dir))?;
+    // Commands and plugins get only the selected repos
+    let project_paths = select_repos(cli, project_paths, meta_dir, || {
+        repo_filter::repo_names(&meta_projects, &tree)
+    })?;
 
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
         directories: project_paths.clone(),
         ignore: ignore_list,
-        include_filters: include_opt.clone(),
-        exclude_filters: exclude_opt.clone(),
         verbose: cli.verbose,
         silent: cli.silent,
         parallel,
@@ -929,8 +932,8 @@ fn handle_command_dispatch(
         silent: cli.silent,
         recursive,
         depth,
-        include_filters: include_opt,
-        exclude_filters: exclude_opt,
+        include_filters: cli.include.clone(),
+        exclude_filters: cli.exclude.clone(),
         strict: cli.strict,
     };
 
@@ -1308,33 +1311,20 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
 }
 
 /// Convert an empty Vec into None, non-empty into Some.
-/// An `--include` or `--exclude` list, when given.
-type Filter = Option<Vec<String>>;
-
-/// `--include` and `--exclude` as the paths from `root` of the repos among
-/// `dirs` they name (see [`repo_filter::resolve`]); names come from the `.meta`
-/// tree at `meta_dir`.
-fn resolve_filters(
+/// The repos among `dirs` that `--include`/`--exclude` select (see
+/// [`repo_filter::select`]); `names` lists the `.meta` names they may use.
+fn select_repos(
     cli: &Cli,
-    dirs: &[String],
+    dirs: Vec<String>,
     root: &std::path::Path,
-    meta_dir: Option<&std::path::Path>,
-) -> Result<(Filter, Filter)> {
-    let given = |values: &Filter| values.clone().filter(|v| !v.is_empty());
-    let (include, exclude) = (given(&cli.include), given(&cli.exclude));
-    if include.is_none() && exclude.is_none() {
-        return Ok((None, None));
+    names: impl FnOnce() -> Vec<(String, String)>,
+) -> Result<Vec<String>> {
+    let include = cli.include.clone().unwrap_or_default();
+    let exclude = cli.exclude.clone().unwrap_or_default();
+    if include.is_empty() && exclude.is_empty() {
+        return Ok(dirs);
     }
-    let names = meta_dir.map(repo_filter::repo_names).unwrap_or_default();
-    let resolve = |flag, values: Filter| {
-        values
-            .map(|values| repo_filter::resolve(flag, &values, dirs, root, &names))
-            .transpose()
-    };
-    Ok((
-        resolve("--include", include)?,
-        resolve("--exclude", exclude)?,
-    ))
+    repo_filter::select(&include, &exclude, &dirs, root, &names())
 }
 
 /// Print unrecognized command error with suggestion and help, then exit.
