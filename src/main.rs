@@ -1062,13 +1062,19 @@ fn handle_plugin_command(
                 // Direct URL install
                 let plugin_name = installer.install_from_url(&name)?;
                 if !json {
-                    println!("Successfully installed {plugin_name} to {location}");
+                    println!(
+                        "Successfully installed {} to {location}",
+                        escape(&plugin_name)
+                    );
                 }
             } else if let Some(shorthand) = GitHubShorthand::parse(&name) {
                 // GitHub shorthand install (user/repo[@version])
                 let plugin_name = installer.install_from_github(&shorthand)?;
                 if !json {
-                    println!("Successfully installed {plugin_name} to {location}");
+                    println!(
+                        "Successfully installed {} to {location}",
+                        escape(&plugin_name)
+                    );
                 }
             } else {
                 // Registry-based install
@@ -1082,11 +1088,13 @@ fn handle_plugin_command(
                             let plugin_name = installer.install_from_github(&shorthand)?;
                             if !json {
                                 println!(
-                                    "Successfully installed {plugin_name} from {source} to {location}"
+                                    "Successfully installed {} from {} to {location}",
+                                    escape(&plugin_name),
+                                    escape(&source)
                                 );
                             }
                         } else {
-                            anyhow::bail!("Invalid plugin source in registry: {}", source);
+                            anyhow::bail!("Invalid plugin source in registry: {}", escape(&source));
                         }
                     }
                     Err(_) => {
@@ -1097,9 +1105,9 @@ fn handle_plugin_command(
                         if !json {
                             println!(
                                 "Successfully installed {} v{} ({}) to {location}",
-                                metadata.name,
-                                metadata.version,
-                                installed.join(", ")
+                                escape(&metadata.name),
+                                escape(&metadata.version),
+                                escape(&installed.join(", "))
                             );
                         }
                     }
@@ -1216,7 +1224,9 @@ fn handle_plugin_command(
                             if !json {
                                 println!(
                                     "Update available for {}: {} → {}",
-                                    plugin_name, current, latest
+                                    escape(&plugin_name),
+                                    escape(&current),
+                                    escape(&latest)
                                 );
                             }
                         } else {
@@ -1224,14 +1234,17 @@ fn handle_plugin_command(
                             if !json {
                                 println!(
                                     "Successfully updated {} from {} to {} in {}",
-                                    updated, current, latest, location
+                                    escape(&updated),
+                                    escape(&current),
+                                    escape(&latest),
+                                    escape(location)
                                 );
                             }
                         }
                     }
                     None => {
                         if !json {
-                            println!("{} is already up to date", plugin_name);
+                            println!("{} is already up to date", escape(&plugin_name));
                         }
                     }
                 }
@@ -1259,7 +1272,12 @@ fn handle_plugin_command(
                     if !json {
                         println!("Updates available:");
                         for (name, current, latest) in &updates_available {
-                            println!("  {} {} → {}", name, current, latest);
+                            println!(
+                                "  {} {} → {}",
+                                escape(name),
+                                escape(current),
+                                escape(latest)
+                            );
                         }
                     }
                 } else {
@@ -1288,7 +1306,11 @@ fn handle_plugin_command(
                         }
                     }
                     if !json {
-                        println!("\nUpdated {} plugin(s) in {}", updated_count, location);
+                        println!(
+                            "\nUpdated {} plugin(s) in {}",
+                            updated_count,
+                            escape(location)
+                        );
                     }
                 }
             }
