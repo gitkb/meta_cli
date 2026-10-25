@@ -329,7 +329,7 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
         md(&ctx.name),
         ctx.repo_count
     ));
-    out.push_str(&ctx.description);
+    out.push_str(&md(&ctx.description));
     out.push_str("\n\n");
 
     // Repo table
@@ -379,7 +379,11 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
     // Key commands
     out.push_str("\n## Key Commands\n");
     for cmd in &ctx.commands {
-        out.push_str(&format!("- `{}` — {}\n", cmd.command, cmd.description));
+        out.push_str(&format!(
+            "- `{}` — {}\n",
+            md(&cmd.command),
+            md(&cmd.description)
+        ));
     }
 
     // Dependencies

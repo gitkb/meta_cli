@@ -140,6 +140,7 @@ impl SubprocessPluginManager {
                     && !name.ends_with(".dylib")
                     && !name.ends_with(".so")
                     && !name.ends_with(".dll")
+                    && is_executable(&path)
                 {
                     // It is run: skip it if another user could have changed it
                     match meta_core::data_dir::check_trusted_file(&path) {

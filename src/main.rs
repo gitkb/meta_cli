@@ -911,7 +911,7 @@ fn handle_command_dispatch(
         // The walk reads the default config file; with --config, start from
         // the chosen one and walk only the nested meta repos
         tree = match cli.config {
-            Some(_) => walk_from(meta_dir, &meta_projects, depth),
+            Some(_) => config::walk_projects(meta_dir, &meta_projects, depth)?,
             None => config::walk_meta_tree(meta_dir, depth)?,
         };
         project_paths = vec![meta_dir_str.clone()];
@@ -1267,13 +1267,22 @@ fn handle_plugin_command(
                         match installer.update_plugin(name) {
                             Ok(_) => {
                                 if !json {
-                                    println!("Updated {} from {} to {}", name, current, latest);
+                                    println!(
+                                        "Updated {} from {} to {}",
+                                        escape(name),
+                                        escape(current),
+                                        escape(latest)
+                                    );
                                 }
                                 updated_count += 1;
                             }
                             Err(e) => {
                                 if !json {
-                                    eprintln!("Failed to update {}: {}", name, e);
+                                    eprintln!(
+                                        "Failed to update {}: {}",
+                                        escape(name),
+                                        escape_lines(&format!("{e:#}"))
+                                    );
                                 }
                             }
                         }
@@ -1437,53 +1446,6 @@ fn check_and_warn_orphan() {
         }
         eprintln!();
     }
-}
-
-/// The meta tree whose top level is `projects` (from the config the user
-/// chose), walked the way `walk_meta_tree` walks the default config: nested
-/// meta repos `depth` levels down, each directory expanded at most once.
-fn walk_from(
-    meta_dir: &std::path::Path,
-    projects: &[ProjectInfo],
-    depth: Option<usize>,
-) -> Vec<MetaTreeNode> {
-    fn walk(
-        dir: &std::path::Path,
-        projects: &[ProjectInfo],
-        depth: Option<usize>,
-        visited: &mut std::collections::HashSet<PathBuf>,
-    ) -> Vec<MetaTreeNode> {
-        let mut nodes: Vec<MetaTreeNode> = projects
-            .iter()
-            .map(|project| {
-                let project_dir = dir.join(&project.path);
-                let config = find_meta_config(&project_dir, None).filter(|(path, _)| {
-                    project_dir.is_dir() && path.parent() == Some(&project_dir)
-                });
-                let canonical = project_dir.canonicalize().unwrap_or(project_dir.clone());
-                let children = match &config {
-                    Some((path, _)) if depth != Some(0) && visited.insert(canonical) => {
-                        parse_meta_config(path)
-                            .map(|(nested, _)| {
-                                let depth = depth.map(|d| d.saturating_sub(1));
-                                walk(&project_dir, &nested, depth, visited)
-                            })
-                            .unwrap_or_default()
-                    }
-                    _ => vec![],
-                };
-                MetaTreeNode {
-                    info: project.clone(),
-                    is_meta: config.is_some(),
-                    children,
-                }
-            })
-            .collect();
-        nodes.sort_by(|a, b| a.info.name.cmp(&b.info.name));
-        nodes
-    }
-    let root = meta_dir.canonicalize().unwrap_or(meta_dir.to_path_buf());
-    walk(meta_dir, projects, depth, &mut [root].into_iter().collect())
 }
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.
