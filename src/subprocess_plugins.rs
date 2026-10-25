@@ -177,8 +177,10 @@ impl SubprocessPluginManager {
     /// `args` is the command as typed after `meta` (e.g. `["git", "status"]`).
     /// The plugin whose claimed command is the longest whole-word prefix of
     /// `args` gets it. Otherwise a plugin claiming commands under the first
-    /// word owns that namespace and gets the whole command, and handles
-    /// subcommands it does not implement itself (e.g. meta-git runs raw git).
+    /// word owns that namespace and gets that word as its command, with the
+    /// rest as args, and handles subcommands it does not implement itself
+    /// (e.g. meta-git runs raw git). Only claimed words are joined into the
+    /// request's command; what the user typed stays separate args.
     fn route(&self, args: &[String]) -> Option<(&SubprocessPlugin, usize)> {
         let first = args.first()?;
         let claims = || {
@@ -201,7 +203,7 @@ impl SubprocessPluginManager {
             .or_else(|| {
                 claims()
                     .find(|(_, words)| words.first() == Some(&first.as_str()))
-                    .map(|(plugin, _)| (plugin, args.len()))
+                    .map(|(plugin, _)| (plugin, 1))
             })
     }
 
@@ -336,7 +338,7 @@ impl SubprocessPluginManager {
             for pre_cmd in &plan.pre_commands {
                 let cmd = DirCommand {
                     dir: pre_cmd.dir.clone(),
-                    cmd: pre_cmd.cmd.clone(),
+                    argv: pre_cmd.argv.clone(),
                     env: pre_cmd.env.clone(),
                 };
                 // Ignore failures for pre_commands (e.g., SSH socket already exists)
@@ -356,7 +358,7 @@ impl SubprocessPluginManager {
                 .iter()
                 .map(|c| DirCommand {
                     dir: c.dir.clone(),
-                    cmd: c.cmd.clone(),
+                    argv: c.argv.clone(),
                     env: c.env.clone(),
                 })
                 .collect();
@@ -409,7 +411,7 @@ impl SubprocessPluginManager {
             for post_cmd in &plan.post_commands {
                 let cmd = DirCommand {
                     dir: post_cmd.dir.clone(),
-                    cmd: post_cmd.cmd.clone(),
+                    argv: post_cmd.argv.clone(),
                     env: post_cmd.env.clone(),
                 };
                 if let Err(e) = run_commands(&post_config, &[cmd]) {
@@ -760,15 +762,15 @@ mod tests {
             routed(&manager, &["cargo", "build", "--release"]),
             Some(("rust".to_string(), 2))
         );
-        // Unclaimed subcommands go whole to the namespace owner; words match
-        // whole, so "buildx" is not "build"
+        // Unclaimed subcommands go to the namespace owner as its first word,
+        // the rest staying args; words match whole, so "buildx" is not "build"
         assert_eq!(
             routed(&manager, &["cargo", "--version"]),
-            Some(("rust".to_string(), 2))
+            Some(("rust".to_string(), 1))
         );
         assert_eq!(
             routed(&manager, &["cargo", "buildx", "x"]),
-            Some(("rust".to_string(), 3))
+            Some(("rust".to_string(), 1))
         );
         assert_eq!(routed(&manager, &["gitx", "status"]), None);
         assert_eq!(routed(&manager, &["npm", "install"]), None);
@@ -972,17 +974,17 @@ mod tests {
         let json = r#"{
             "plan": {
                 "commands": [
-                    {"dir": "./repo1", "cmd": "git status"},
-                    {"dir": "./repo2", "cmd": "git status"}
+                    {"dir": "./repo1", "argv": ["git", "status"]},
+                    {"dir": "./repo2", "argv": ["git", "status"]}
                 ]
             }
         }"#;
         let response: PluginResponse = serde_json::from_str(json).unwrap();
         assert_eq!(response.plan.commands.len(), 2);
         assert_eq!(response.plan.commands[0].dir, "./repo1");
-        assert_eq!(response.plan.commands[0].cmd, "git status");
+        assert_eq!(response.plan.commands[0].argv, ["git", "status"]);
         assert_eq!(response.plan.commands[1].dir, "./repo2");
-        assert_eq!(response.plan.commands[1].cmd, "git status");
+        assert_eq!(response.plan.commands[1].argv, ["git", "status"]);
         assert!(response.plan.parallel.is_none());
     }
 
@@ -991,7 +993,7 @@ mod tests {
         let json = r#"{
             "plan": {
                 "commands": [
-                    {"dir": "/abs/path", "cmd": "npm install"}
+                    {"dir": "/abs/path", "argv": ["npm", "install"]}
                 ],
                 "parallel": true
             }
@@ -1006,7 +1008,7 @@ mod tests {
         let json = r#"{
             "plan": {
                 "commands": [
-                    {"dir": ".", "cmd": "echo hello"}
+                    {"dir": ".", "argv": ["echo", "hello"]}
                 ],
                 "parallel": false
             }
@@ -1032,17 +1034,17 @@ mod tests {
     fn test_execution_plan_deserialization() {
         let json = r#"{
             "commands": [
-                {"dir": "proj1", "cmd": "make build"},
-                {"dir": "proj2", "cmd": "cargo build"}
+                {"dir": "proj1", "argv": ["make", "build"]},
+                {"dir": "proj2", "argv": ["cargo", "build"]}
             ],
             "parallel": true
         }"#;
         let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.commands.len(), 2);
         assert_eq!(plan.commands[0].dir, "proj1");
-        assert_eq!(plan.commands[0].cmd, "make build");
+        assert_eq!(plan.commands[0].argv, ["make", "build"]);
         assert_eq!(plan.commands[1].dir, "proj2");
-        assert_eq!(plan.commands[1].cmd, "cargo build");
+        assert_eq!(plan.commands[1].argv, ["cargo", "build"]);
         assert_eq!(plan.parallel, Some(true));
     }
 
@@ -1050,7 +1052,7 @@ mod tests {
     fn test_execution_plan_no_parallel_field() {
         let json = r#"{
             "commands": [
-                {"dir": ".", "cmd": "ls"}
+                {"dir": ".", "argv": ["ls"]}
             ]
         }"#;
         let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
@@ -1061,27 +1063,33 @@ mod tests {
 
     #[test]
     fn test_planned_command_deserialization() {
-        let json = r#"{"dir": "/home/user/project", "cmd": "git pull --rebase"}"#;
+        let json = r#"{"dir": "/home/user/project", "argv": ["git", "pull", "--rebase"]}"#;
         let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
         assert_eq!(cmd.dir, "/home/user/project");
-        assert_eq!(cmd.cmd, "git pull --rebase");
+        assert_eq!(cmd.argv, ["git", "pull", "--rebase"]);
     }
 
     #[test]
     fn test_planned_command_relative_dir() {
-        let json = r#"{"dir": "./relative/path", "cmd": "npm test"}"#;
+        let json = r#"{"dir": "./relative/path", "argv": ["npm", "test"]}"#;
         let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
         assert_eq!(cmd.dir, "./relative/path");
-        assert_eq!(cmd.cmd, "npm test");
+        assert_eq!(cmd.argv, ["npm", "test"]);
     }
 
     #[test]
     fn test_planned_command_complex_command() {
-        let json = r#"{"dir": ".", "cmd": "git clone https://github.com/org/repo.git --depth 1"}"#;
+        let json = r#"{"dir": ".", "argv": ["git", "clone", "https://github.com/org/repo.git", "--depth", "1"]}"#;
         let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
         assert_eq!(
-            cmd.cmd,
-            "git clone https://github.com/org/repo.git --depth 1"
+            cmd.argv,
+            [
+                "git",
+                "clone",
+                "https://github.com/org/repo.git",
+                "--depth",
+                "1"
+            ]
         );
     }
 
@@ -1161,19 +1169,19 @@ mod tests {
         // Test a realistic execution plan with different commands per directory
         let json = r#"{
             "commands": [
-                {"dir": "./frontend", "cmd": "npm install"},
-                {"dir": "./backend", "cmd": "cargo build"},
-                {"dir": "./scripts", "cmd": "python setup.py install"},
-                {"dir": "./docs", "cmd": "make html"}
+                {"dir": "./frontend", "argv": ["npm", "install"]},
+                {"dir": "./backend", "argv": ["cargo", "build"]},
+                {"dir": "./scripts", "argv": ["python", "setup.py", "install"]},
+                {"dir": "./docs", "argv": ["make", "html"]}
             ],
             "parallel": false
         }"#;
         let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.commands.len(), 4);
-        assert_eq!(plan.commands[0].cmd, "npm install");
-        assert_eq!(plan.commands[1].cmd, "cargo build");
-        assert_eq!(plan.commands[2].cmd, "python setup.py install");
-        assert_eq!(plan.commands[3].cmd, "make html");
+        assert_eq!(plan.commands[0].argv, ["npm", "install"]);
+        assert_eq!(plan.commands[1].argv, ["cargo", "build"]);
+        assert_eq!(plan.commands[2].argv, ["python", "setup.py", "install"]);
+        assert_eq!(plan.commands[3].argv, ["make", "html"]);
     }
 
     #[test]
@@ -1181,17 +1189,17 @@ mod tests {
         // Test ExecutionPlan with pre_commands (e.g., SSH setup)
         let json = r#"{
             "pre_commands": [
-                {"dir": ".", "cmd": "ssh -fNM -o ControlMaster=auto git@github.com"}
+                {"dir": ".", "argv": ["ssh", "-fNM", "-o", "ControlMaster=auto", "git@github.com"]}
             ],
             "commands": [
-                {"dir": "./repo1", "cmd": "git push"},
-                {"dir": "./repo2", "cmd": "git push"}
+                {"dir": "./repo1", "argv": ["git", "push"]},
+                {"dir": "./repo2", "argv": ["git", "push"]}
             ],
             "parallel": true
         }"#;
         let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
         assert_eq!(plan.pre_commands.len(), 1);
-        assert!(plan.pre_commands[0].cmd.contains("ssh"));
+        assert!(plan.pre_commands[0].argv[0] == "ssh");
         assert_eq!(plan.commands.len(), 2);
         assert_eq!(plan.parallel, Some(true));
     }
@@ -1201,10 +1209,10 @@ mod tests {
         // Test ExecutionPlan with post_commands (e.g., cleanup)
         let json = r#"{
             "commands": [
-                {"dir": ".", "cmd": "make build"}
+                {"dir": ".", "argv": ["make", "build"]}
             ],
             "post_commands": [
-                {"dir": ".", "cmd": "make clean"}
+                {"dir": ".", "argv": ["make", "clean"]}
             ],
             "parallel": false
         }"#;
@@ -1212,14 +1220,14 @@ mod tests {
         assert!(plan.pre_commands.is_empty());
         assert_eq!(plan.commands.len(), 1);
         assert_eq!(plan.post_commands.len(), 1);
-        assert!(plan.post_commands[0].cmd.contains("clean"));
+        assert!(plan.post_commands[0].argv.contains(&"clean".to_string()));
     }
 
     #[test]
     fn test_execution_plan_backward_compatible() {
         // Test that old JSON without pre/post_commands still works
         let json = r#"{
-            "commands": [{"dir": ".", "cmd": "ls"}]
+            "commands": [{"dir": ".", "argv": ["ls"]}]
         }"#;
         let plan: ExecutionPlan = serde_json::from_str(json).unwrap();
         assert!(plan.pre_commands.is_empty());
@@ -1229,10 +1237,13 @@ mod tests {
 
     #[test]
     fn test_planned_command_with_special_characters() {
-        let json = r#"{"dir": "./path with spaces", "cmd": "echo \"hello world\" && echo 'single quotes'"}"#;
+        let json = r#"{"dir": "./path with spaces", "argv": ["echo", "\"hello world\" && echo 'single quotes'"]}"#;
         let cmd: PlannedCommand = serde_json::from_str(json).unwrap();
         assert_eq!(cmd.dir, "./path with spaces");
-        assert_eq!(cmd.cmd, "echo \"hello world\" && echo 'single quotes'");
+        assert_eq!(
+            cmd.argv,
+            ["echo", "\"hello world\" && echo 'single quotes'"]
+        );
     }
 
     // ============ get_plugin_for_command Tests ============

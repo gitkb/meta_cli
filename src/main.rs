@@ -11,7 +11,7 @@ use std::path::PathBuf;
 mod init;
 mod registry;
 mod subprocess_plugins;
-use meta_cli::worktree;
+use meta_cli::{repo_filter, worktree};
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 // === CLI Structs ===
@@ -47,7 +47,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Specify directories to exclude"
+        help = "Skip these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
     )]
     exclude: Option<Vec<String>>,
 
@@ -56,7 +56,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Specify directories to include"
+        help = "Only run in these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
     )]
     include: Option<Vec<String>>,
 
@@ -523,12 +523,18 @@ fn main() -> Result<()> {
                 println!();
                 println!("The command runs as typed in each project directory defined in .meta,");
                 println!("never through a plugin (use `meta git ...` for the git plugin).");
+                println!("No shell parses it: each argument reaches the program as given, so");
+                println!("quotes, $(), ;, | and globs stay literal. For a shell, ask for one.");
+                println!();
+                println!("--include/--exclude take repos by .meta name or path from the root");
+                println!("(. for the root), never part of a path.");
                 println!();
                 println!("Examples:");
                 println!("  meta exec -- npm install");
                 println!("  meta exec -- cargo fmt --check");
                 println!("  meta exec -- make clean");
-                println!("  meta exec --include api,web -- docker-compose up -d");
+                println!("  meta --include api,web exec -- docker-compose up -d");
+                println!("  meta exec -- sh -c 'npm ci && npm test'");
                 std::process::exit(0);
             }
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
@@ -614,8 +620,6 @@ fn handle_command_dispatch(
     // All meta flags come from clap globals (before the command).
     // Command args pass through untouched to avoid collisions with
     // identically-named flags (e.g., grep --include, git clone --depth).
-    let include_filters: Vec<String> = cli.include.clone().unwrap_or_default();
-    let exclude_filters: Vec<String> = cli.exclude.clone().unwrap_or_default();
     let recursive = cli.recursive;
     let dry_run = cli.dry_run;
     let depth = cli.depth;
@@ -638,7 +642,7 @@ fn handle_command_dispatch(
         defaults.parallel
     };
 
-    let command_str = command_args.join(" ");
+    let command_str = loop_lib::display_command(&command_args);
 
     // Check if this is `git clone` - it doesn't require a .meta file because
     // its purpose is to clone the repo that contains the .meta file
@@ -742,8 +746,8 @@ fn handle_command_dispatch(
                     );
                 }
 
-                let include_opt = none_if_empty(include_filters.clone());
-                let exclude_opt = none_if_empty(exclude_filters.clone());
+                let (include_opt, exclude_opt) =
+                    resolve_filters(cli, &wt_directories, &task_dir, config_path.parent())?;
 
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
@@ -777,7 +781,7 @@ fn handle_command_dispatch(
                 };
 
                 if is_explicit_exec {
-                    run(&config, &command_str)?;
+                    run(&config, &command_args)?;
                 } else if plugins.execute(
                     &command_args,
                     &wt_directories,
@@ -808,8 +812,7 @@ fn handle_command_dispatch(
             let directories: Vec<String> =
                 wt_paths.iter().map(|p| p.display().to_string()).collect();
 
-            let include_opt = none_if_empty(include_filters);
-            let exclude_opt = none_if_empty(exclude_filters);
+            let (include_opt, exclude_opt) = resolve_filters(cli, &directories, &task_dir, None)?;
 
             let config = loop_lib::LoopConfig {
                 directories,
@@ -828,7 +831,7 @@ fn handle_command_dispatch(
                 root_dir: Some(task_dir.clone()),
             };
 
-            run(&config, &command_str)?;
+            run(&config, &command_args)?;
             return Ok(());
         }
     }
@@ -897,8 +900,8 @@ fn handle_command_dispatch(
     }
 
     // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
-    let include_opt = none_if_empty(include_filters);
-    let exclude_opt = none_if_empty(exclude_filters);
+    let (include_opt, exclude_opt) =
+        resolve_filters(cli, &project_paths, meta_dir, Some(meta_dir))?;
 
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
@@ -937,7 +940,7 @@ fn handle_command_dispatch(
         if cli.verbose {
             println!("{}", "Running command via loop (explicit exec).".green());
         }
-        run(&config, &command_str)?;
+        run(&config, &command_args)?;
     } else if plugins.execute(
         &command_args,
         &project_paths,
@@ -1305,12 +1308,33 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
 }
 
 /// Convert an empty Vec into None, non-empty into Some.
-fn none_if_empty(v: Vec<String>) -> Option<Vec<String>> {
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
+/// An `--include` or `--exclude` list, when given.
+type Filter = Option<Vec<String>>;
+
+/// `--include` and `--exclude` as the paths from `root` of the repos among
+/// `dirs` they name (see [`repo_filter::resolve`]); names come from the `.meta`
+/// tree at `meta_dir`.
+fn resolve_filters(
+    cli: &Cli,
+    dirs: &[String],
+    root: &std::path::Path,
+    meta_dir: Option<&std::path::Path>,
+) -> Result<(Filter, Filter)> {
+    let given = |values: &Filter| values.clone().filter(|v| !v.is_empty());
+    let (include, exclude) = (given(&cli.include), given(&cli.exclude));
+    if include.is_none() && exclude.is_none() {
+        return Ok((None, None));
     }
+    let names = meta_dir.map(repo_filter::repo_names).unwrap_or_default();
+    let resolve = |flag, values: Filter| {
+        values
+            .map(|values| repo_filter::resolve(flag, &values, dirs, root, &names))
+            .transpose()
+    };
+    Ok((
+        resolve("--include", include)?,
+        resolve("--exclude", exclude)?,
+    ))
 }
 
 /// Print unrecognized command error with suggestion and help, then exit.
