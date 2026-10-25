@@ -307,7 +307,7 @@ impl SubprocessPluginManager {
             .stdout(Stdio::piped()) // Capture stdout to parse response
             .stderr(Stdio::inherit()) // Let stderr pass through for error messages
             .spawn()
-            .with_context(|| format!("Failed to execute plugin {}", plugin.path.display()))?;
+            .with_context(|| format!("Failed to execute plugin {}", escape_path(&plugin.path)))?;
 
         // Send request to plugin's stdin
         if let Some(mut stdin) = child.stdin.take() {

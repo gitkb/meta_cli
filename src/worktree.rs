@@ -234,7 +234,7 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
             "Recursive worktree discovery exceeded 2000000 entries"
         );
         let entry =
-            entry.with_context(|| format!("Cannot scan worktree {}", task_dir.display()))?;
+            entry.with_context(|| format!("Cannot scan worktree {}", escape_path(task_dir)))?;
         if !entry.file_type().is_dir() {
             continue;
         }
@@ -244,7 +244,8 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
             Ok(metadata) => metadata,
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
             Err(error) => {
-                return Err(error).with_context(|| format!("Cannot inspect {}", git_file.display()))
+                return Err(error)
+                    .with_context(|| format!("Cannot inspect {}", escape_path(&git_file)))
             }
         };
         if !metadata.is_file() {
@@ -274,30 +275,30 @@ fn validate_worktree_gitfile(git_file: &Path) -> Result<()> {
     let target = content
         .trim()
         .strip_prefix("gitdir: ")
-        .ok_or_else(|| anyhow::anyhow!("Invalid .git file format at {}", git_file.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid .git file format at {}", escape_path(git_file)))?;
     let admin = git_file
         .parent()
         .unwrap_or(Path::new("."))
         .join(target)
         .canonicalize()
-        .with_context(|| format!("Missing worktree metadata for {}", git_file.display()))?;
+        .with_context(|| format!("Missing worktree metadata for {}", escape_path(git_file)))?;
     anyhow::ensure!(
         admin.join("HEAD").is_file(),
         "Missing worktree HEAD at {}",
-        admin.display()
+        escape_path(&admin)
     );
     let common = std::fs::read_to_string(admin.join("commondir"))?;
     let common = admin.join(common.trim()).canonicalize()?;
     anyhow::ensure!(
         common.join("HEAD").is_file() && common.join("objects").is_dir(),
         "Incomplete common Git metadata at {}",
-        common.display()
+        escape_path(&common)
     );
     let backlink = std::fs::read_to_string(admin.join("gitdir"))?;
     anyhow::ensure!(
         admin.join(backlink.trim()).canonicalize()? == git_file.canonicalize()?,
         "Worktree metadata backlink does not match {}",
-        git_file.display()
+        escape_path(git_file)
     );
     Ok(())
 }
@@ -306,12 +307,12 @@ fn validate_worktree_gitfile(git_file: &Path) -> Result<()> {
 /// .git file contains: "gitdir: /path/to/primary/.git/worktrees/<name>"
 fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     let content = std::fs::read_to_string(git_file)
-        .with_context(|| format!("Failed to read .git file at {}", git_file.display()))?;
+        .with_context(|| format!("Failed to read .git file at {}", escape_path(git_file)))?;
 
     let gitdir = content
         .trim()
         .strip_prefix("gitdir: ")
-        .ok_or_else(|| anyhow::anyhow!("Invalid .git file format at {}", git_file.display()))?;
+        .ok_or_else(|| anyhow::anyhow!("Invalid .git file format at {}", escape_path(git_file)))?;
 
     // gitdir points to: /path/to/primary/.git/worktrees/<name>
     // We need: /path/to/primary/
@@ -324,7 +325,7 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
             .unwrap_or(Path::new("."))
             .join(gitdir_path)
             .canonicalize()
-            .with_context(|| format!("Cannot resolve gitdir from {}", git_file.display()))?
+            .with_context(|| format!("Cannot resolve gitdir from {}", escape_path(git_file)))?
     };
     // Walk up: worktrees/<name> -> .git -> repo root
     let dot_git_dir = gitdir_path
@@ -336,7 +337,7 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     let repo_root = dot_git_dir.parent().ok_or_else(|| {
         anyhow::anyhow!(
             "Cannot find repo root from .git dir: {}",
-            dot_git_dir.display()
+            escape_path(dot_git_dir)
         )
     })?;
 

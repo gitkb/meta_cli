@@ -6,6 +6,7 @@
 
 use anyhow::{Context, Result};
 use log::{debug, info};
+use meta_core::display::escape_path;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -121,8 +122,12 @@ impl PluginManifest {
             return Ok(Self::default());
         }
 
-        let content = std::fs::read_to_string(manifest_path)
-            .with_context(|| format!("Failed to read manifest from {}", manifest_path.display()))?;
+        let content = std::fs::read_to_string(manifest_path).with_context(|| {
+            format!(
+                "Failed to read manifest from {}",
+                escape_path(manifest_path)
+            )
+        })?;
 
         let manifest: Self =
             serde_json::from_str(&content).with_context(|| "Failed to parse plugin manifest")?;
@@ -135,8 +140,9 @@ impl PluginManifest {
         let json =
             serde_json::to_string_pretty(self).with_context(|| "Failed to serialize manifest")?;
 
-        std::fs::write(manifest_path, json)
-            .with_context(|| format!("Failed to write manifest to {}", manifest_path.display()))?;
+        std::fs::write(manifest_path, json).with_context(|| {
+            format!("Failed to write manifest to {}", escape_path(manifest_path))
+        })?;
 
         Ok(())
     }
@@ -674,7 +680,7 @@ impl PluginInstaller {
         std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
             format!(
                 "Failed to create plugins directory: {}",
-                self.plugins_dir.display()
+                escape_path(&self.plugins_dir)
             )
         })
     }
@@ -1068,7 +1074,7 @@ impl PluginInstaller {
         let output = Command::new(plugin_path)
             .arg("--meta-plugin-info")
             .output()
-            .with_context(|| format!("Failed to execute {}", plugin_path.display()))?;
+            .with_context(|| format!("Failed to execute {}", escape_path(plugin_path)))?;
 
         if !output.status.success() {
             anyhow::bail!(
@@ -1134,7 +1140,7 @@ impl PluginInstaller {
         let plugin_path = self.plugins_dir.join(&plugin_name);
         if plugin_path.exists() {
             std::fs::remove_file(&plugin_path)
-                .with_context(|| format!("Failed to remove {}", plugin_path.display()))?;
+                .with_context(|| format!("Failed to remove {}", escape_path(&plugin_path)))?;
 
             // Remove from manifest
             let mut manifest = self.load_manifest()?;
