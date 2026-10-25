@@ -549,7 +549,11 @@ fn main() -> Result<()> {
             // Keep root plugin help fast and plugin-aware, but let nested help
             // requests reach the matched plugin command implementation.
             if let Some(first) = args.first() {
-                let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
+                // A --help after `--` is an argument for the command
+                let wants_help = args
+                    .iter()
+                    .take_while(|a| *a != "--")
+                    .any(|a| a == "--help" || a == "-h");
                 let is_bare = args.len() == 1;
                 let is_root_help = wants_help
                     && args.len() == 2

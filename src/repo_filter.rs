@@ -99,28 +99,27 @@ fn repo_path(dir: &str, root: &Path) -> String {
 }
 
 /// A filter value as the path it names from the root: `.` for the root,
-/// otherwise [`normalize`]d. None for a value that cannot be such a path (empty,
-/// absolute, or with `..`).
+/// otherwise [`normalize`]d. None for a value that cannot be such a path
+/// (empty or absolute).
 fn path_value(value: &str) -> Option<String> {
-    let escapes = Path::new(value)
+    let absolute = Path::new(value)
         .components()
-        .any(|c| !matches!(c, Component::Normal(_) | Component::CurDir));
+        .any(|c| matches!(c, Component::RootDir | Component::Prefix(_)));
     match normalize(value) {
-        _ if escapes || value.is_empty() => None,
+        _ if absolute || value.is_empty() => None,
         path if path.is_empty() => Some(".".to_string()),
         path => Some(path),
     }
 }
 
-/// `path` as `/`-separated names, without `.` parts or a trailing `/`; `.`
-/// alone becomes empty.
+/// `path` `/`-separated, without `.` parts or a trailing `/`; `.` alone
+/// becomes empty. `..` parts stay: dropping them would give two different
+/// directories the same name.
 fn normalize(path: &str) -> String {
     let parts: Vec<_> = Path::new(path)
         .components()
-        .filter_map(|c| match c {
-            Component::Normal(name) => Some(name.to_string_lossy()),
-            _ => None,
-        })
+        .filter(|c| !matches!(c, Component::CurDir))
+        .map(|c| c.as_os_str().to_string_lossy())
         .collect();
     parts.join("/")
 }
@@ -133,6 +132,18 @@ mod tests {
         values.iter().map(|s| s.to_string()).collect()
     }
 
+    fn project(name: &str, path: &str) -> ProjectInfo {
+        ProjectInfo {
+            name: name.to_string(),
+            path: path.to_string(),
+            repo: None,
+            tags: vec![],
+            provides: vec![],
+            depends_on: vec![],
+            meta: false,
+        }
+    }
+
     #[test]
     fn values_name_whole_repos_never_parts_of_paths() {
         let root = std::env::temp_dir().join("ws").join("a");
@@ -141,16 +152,7 @@ mod tests {
             .iter()
             .map(|rel| root.join(rel).display().to_string())
             .collect();
-        let projects = [ProjectInfo {
-            name: "core-lib".to_string(),
-            path: "./libs/core/".to_string(),
-            repo: None,
-            tags: vec![],
-            provides: vec![],
-            depends_on: vec![],
-            meta: false,
-        }];
-        let names = repo_names(&projects, &[]);
+        let names = repo_names(&[project("core-lib", "./libs/core/")], &[]);
         let select = |include: &[&str], exclude: &[&str]| {
             select(&strings(include), &strings(exclude), &dirs, &root, &names)
         };
@@ -182,5 +184,28 @@ mod tests {
         }
         let err = select(&["api"], &["api"]).unwrap_err().to_string();
         assert!(err.contains("leave no repo"), "{err}");
+    }
+
+    #[test]
+    fn parent_parts_keep_different_repos_apart() {
+        let root = std::env::temp_dir().join("ws").join("a");
+        let rels = ["", "..", "api", "libs/../api"];
+        let dirs: Vec<String> = rels
+            .iter()
+            .map(|rel| root.join(rel).display().to_string())
+            .collect();
+        let names = repo_names(
+            &[project("parent", ".."), project("outer", "libs/../api")],
+            &[],
+        );
+        for (value, rel) in [
+            (".", ""),
+            ("parent", ".."),
+            ("api", "api"),
+            ("outer", "libs/../api"),
+        ] {
+            let chosen = select(&strings(&[value]), &[], &dirs, &root, &names).unwrap();
+            assert_eq!(chosen, [root.join(rel).display().to_string()], "{value}");
+        }
     }
 }
