@@ -734,6 +734,10 @@ fn handle_command_dispatch(
                     .map(|p| p.display().to_string())
                     .collect();
 
+                // A worktree member sits at its alias, so its path in the set
+                // is the name to select it by
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
+
                 if wt_directories.is_empty() {
                     eprintln!(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
@@ -752,10 +756,6 @@ fn handle_command_dispatch(
                         config_path.display()
                     );
                 }
-
-                // A worktree member sits at its alias, so its path in the set
-                // is the name to select it by
-                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
 
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
@@ -1417,32 +1417,50 @@ fn check_and_warn_orphan() {
 }
 
 /// The meta tree whose top level is `projects` (from the config the user
-/// chose), each nested meta repo walked from its own config, `depth` levels
-/// down as `walk_meta_tree` counts them.
+/// chose), walked the way `walk_meta_tree` walks the default config: nested
+/// meta repos `depth` levels down, each directory expanded at most once.
 fn walk_from(
     meta_dir: &std::path::Path,
     projects: &[ProjectInfo],
     depth: Option<usize>,
 ) -> Vec<MetaTreeNode> {
-    projects
-        .iter()
-        .map(|project| {
-            let dir = meta_dir.join(&project.path);
-            let is_meta = find_meta_config(&dir, None)
-                .is_some_and(|(path, _)| path.parent() == Some(dir.as_path()));
-            let children = match depth {
-                Some(0) => vec![],
-                _ if is_meta => config::walk_meta_tree(&dir, depth.map(|d| d.saturating_sub(1)))
-                    .unwrap_or_default(),
-                _ => vec![],
-            };
-            MetaTreeNode {
-                info: project.clone(),
-                is_meta,
-                children,
-            }
-        })
-        .collect()
+    fn walk(
+        dir: &std::path::Path,
+        projects: &[ProjectInfo],
+        depth: Option<usize>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+    ) -> Vec<MetaTreeNode> {
+        let mut nodes: Vec<MetaTreeNode> = projects
+            .iter()
+            .map(|project| {
+                let project_dir = dir.join(&project.path);
+                let config = find_meta_config(&project_dir, None).filter(|(path, _)| {
+                    project_dir.is_dir() && path.parent() == Some(&project_dir)
+                });
+                let canonical = project_dir.canonicalize().unwrap_or(project_dir.clone());
+                let children = match &config {
+                    Some((path, _)) if depth != Some(0) && visited.insert(canonical) => {
+                        parse_meta_config(path)
+                            .map(|(nested, _)| {
+                                let depth = depth.map(|d| d.saturating_sub(1));
+                                walk(&project_dir, &nested, depth, visited)
+                            })
+                            .unwrap_or_default()
+                    }
+                    _ => vec![],
+                };
+                MetaTreeNode {
+                    info: project.clone(),
+                    is_meta: config.is_some(),
+                    children,
+                }
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+        nodes
+    }
+    let root = meta_dir.canonicalize().unwrap_or(meta_dir.to_path_buf());
+    walk(meta_dir, projects, depth, &mut [root].into_iter().collect())
 }
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.
