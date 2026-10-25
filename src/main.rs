@@ -894,7 +894,12 @@ fn handle_command_dispatch(
             let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
             println!("Recursive mode enabled, max depth: {depth_str}");
         }
-        tree = config::walk_meta_tree(meta_dir, depth)?;
+        // The walk reads the default config file; with --config, start from
+        // the chosen one and walk only the nested meta repos
+        tree = match cli.config {
+            Some(_) => walk_from(meta_dir, &meta_projects, depth),
+            None => config::walk_meta_tree(meta_dir, depth)?,
+        };
         project_paths = vec![meta_dir_str.clone()];
         let flat = flatten_with_tag_filter(&tree, &cli.tag);
         project_paths.extend(
@@ -1408,6 +1413,35 @@ fn check_and_warn_orphan() {
         }
         eprintln!();
     }
+}
+
+/// The meta tree whose top level is `projects` (from the config the user
+/// chose), each nested meta repo walked from its own config, `depth` levels
+/// down as `walk_meta_tree` counts them.
+fn walk_from(
+    meta_dir: &std::path::Path,
+    projects: &[ProjectInfo],
+    depth: Option<usize>,
+) -> Vec<MetaTreeNode> {
+    projects
+        .iter()
+        .map(|project| {
+            let dir = meta_dir.join(&project.path);
+            let is_meta = find_meta_config(&dir, None)
+                .is_some_and(|(path, _)| path.parent() == Some(dir.as_path()));
+            let children = match depth {
+                Some(0) => vec![],
+                _ if is_meta => config::walk_meta_tree(&dir, depth.map(|d| d.saturating_sub(1)))
+                    .unwrap_or_default(),
+                _ => vec![],
+            };
+            MetaTreeNode {
+                info: project.clone(),
+                is_meta,
+                children,
+            }
+        })
+        .collect()
 }
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.

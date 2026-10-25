@@ -47,7 +47,9 @@ pub fn select(
             .iter()
             .filter(|path| {
                 wanted.as_deref() == Some(path.as_str())
-                    || names.iter().any(|(name, p)| name == value && p == *path)
+                    || names.iter().any(|(name, p)| {
+                        (name == value || wanted.as_deref() == Some(name.as_str())) && p == *path
+                    })
             })
             .map(String::as_str)
             .collect();
@@ -166,6 +168,7 @@ mod tests {
         assert_eq!(picked(&["."], &[]), ["."]);
         assert_eq!(picked(&["libs/core"], &[]), ["libs/core"]);
         assert_eq!(picked(&["core-lib"], &[]), ["libs/core"]);
+        assert_eq!(picked(&["./core-lib/"], &[]), ["libs/core"]);
         assert_eq!(picked(&[], &["api"]), [".", "api-legacy", "libs/core"]);
         assert_eq!(picked(&["api", "api-legacy"], &["api"]), ["api-legacy"]);
         assert_eq!(picked(&[], &[]), [".", "api", "api-legacy", "libs/core"]);
