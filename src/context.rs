@@ -319,10 +319,10 @@ fn build_dependency_map(projects: &[ProjectInfo]) -> Option<HashMap<String, Vec<
 // ── Markdown Formatting ─────────────────────────────────
 
 /// Text from `.meta`, git or the filesystem, made safe for this markdown,
-/// which agents read: control characters escaped, and `|` escaped so the
-/// value stays in its table cell.
+/// which agents read: control characters escaped, then `\` and `|` escaped
+/// so the value stays in its table cell.
 fn md(s: &str) -> String {
-    escape(s).replace('|', "\\|")
+    escape(s).replace('\\', "\\\\").replace('|', "\\|")
 }
 
 fn md_list(items: &[String]) -> String {
@@ -469,7 +469,7 @@ mod tests {
         let mut ctx = make_ctx(
             vec![make_repo(
                 "z\u{1b}[2J",
-                Some("evil|branch\u{1b}]52;c;cm0K\u{7}"),
+                Some("evil|branch\\|x\u{1b}]52;c;cm0K\u{7}"),
                 Some(false),
                 Some(0),
                 vec!["n\nfake"],
@@ -484,15 +484,15 @@ mod tests {
         assert!(!md.contains('\u{1b}') && !md.contains('\u{7}'), "{md}");
         assert!(
             md.contains(
-                "| z\\u{1b}[2J | evil\\|branch\\u{1b}]52;c;cm0K\\u{7} | clean | n\\nfake |"
+                "| z\\\\u{1b}[2J | evil\\|branch\\\\\\|x\\\\u{1b}]52;c;cm0K\\\\u{7} | clean | n\\\\nfake |"
             ),
             "{md}"
         );
         assert!(
-            md.contains("# Meta Workspace: ws\\u{1b}]0;TITLE\\u{7} (1 repos)"),
+            md.contains("# Meta Workspace: ws\\\\u{1b}]0;TITLE\\\\u{7} (1 repos)"),
             "{md}"
         );
-        assert!(md.contains("a\\u{1b}[1A → b\\nc"), "{md}");
+        assert!(md.contains("a\\\\u{1b}[1A → b\\\\nc"), "{md}");
     }
 
     // ── format_status ──────────────────────────────────
