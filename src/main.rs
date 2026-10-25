@@ -5,7 +5,7 @@ use loop_lib::run;
 use meta_core::config::{
     self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
 };
-use meta_core::display::{escape, escape_path};
+use meta_core::display::{escape, escape_lines, escape_path};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -456,7 +456,19 @@ fn print_plugin_update_help() {
 
 // === Main Entry Point ===
 
-fn main() -> Result<()> {
+fn main() -> std::process::ExitCode {
+    match run_cli() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // as Rust prints an error returned from main, but escaped: it can
+            // carry paths and names from git and the filesystem
+            eprintln!("Error: {}", escape_lines(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_cli() -> Result<()> {
     env_logger::init();
 
     let mut cli = Cli::parse();

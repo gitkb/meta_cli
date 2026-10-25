@@ -51,11 +51,25 @@ impl SubprocessPluginManager {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
+        // ~/.meta/plugins/ is refused when another user could write to it. The
+        // walk up from cwd passes through it from anywhere under $HOME, so
+        // mark it visited to keep that walk from running what it holds.
+        let global_plugins = meta_core::data_dir::data_subdir("plugins");
+        if let Err(e) = &global_plugins {
+            eprintln!("warning: skipping global plugins: {e:#}");
+            if let Ok(dir) = meta_core::meta_dir() {
+                let refused = dir.join("plugins");
+                visited.insert(refused.canonicalize().unwrap_or(refused));
+            }
+        }
+
         // Search in .meta/plugins/ directories walking up from cwd (project-local)
         let mut current_dir = std::env::current_dir()?;
         loop {
             let plugin_dir = current_dir.join(".meta").join("plugins");
-            if plugin_dir.exists() && plugin_dir.is_dir() && visited.insert(plugin_dir.clone()) {
+            if plugin_dir.is_dir()
+                && visited.insert(plugin_dir.canonicalize().unwrap_or(plugin_dir.clone()))
+            {
                 self.scan_directory(&plugin_dir)?;
             }
             if let Some(parent) = current_dir.parent() {
@@ -65,15 +79,15 @@ impl SubprocessPluginManager {
             }
         }
 
-        // Search in ~/.meta/plugins/ (global installed), which is refused when
-        // another user could write to it
-        match meta_core::data_dir::data_subdir("plugins") {
-            Ok(global_plugins) => {
-                if visited.insert(global_plugins.clone()) {
-                    self.scan_directory(&global_plugins)?;
-                }
+        // Search in ~/.meta/plugins/ (global installed)
+        if let Ok(global_plugins) = global_plugins {
+            if visited.insert(
+                global_plugins
+                    .canonicalize()
+                    .unwrap_or(global_plugins.clone()),
+            ) {
+                self.scan_directory(&global_plugins)?;
             }
-            Err(e) => eprintln!("warning: skipping global plugins: {e:#}"),
         }
 
         // Search in PATH for meta-* executables (bundled/system)

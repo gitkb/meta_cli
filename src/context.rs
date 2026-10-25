@@ -14,7 +14,7 @@ use std::time::{Duration, SystemTime};
 use crate::dependency_graph::DependencyGraph;
 use crate::git_utils;
 use meta_core::config::{self, ProjectInfo};
-use meta_core::display::escape;
+use meta_core::display::{escape, escape_path};
 
 // ── Cache ───────────────────────────────────────────────
 
@@ -48,7 +48,7 @@ fn save_cache(cached: &CachedContext, verbose: bool) {
                     eprintln!("Failed to write context cache: {e}");
                 }
             } else if verbose {
-                eprintln!("Saved context cache to {}", path.display());
+                eprintln!("Saved context cache to {}", escape_path(&path));
             }
         }
         Err(e) => {
@@ -150,7 +150,7 @@ pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool
         eprintln!(
             "Found {} projects in {}",
             projects.len(),
-            config_path.display()
+            escape_path(&config_path)
         );
     }
 
