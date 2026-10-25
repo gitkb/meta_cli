@@ -737,7 +737,7 @@ mod tests {
             ("rust", vec!["cargo build", "cargo test"]),
             (
                 "git",
-                vec!["git status", "git snapshot", "git snapshot create"],
+                vec!["git status", "git worktree", "git worktree create"],
             ),
         ] {
             manager.plugins.insert(
@@ -757,7 +757,7 @@ mod tests {
 
         // The longest claimed command wins; the rest are the plugin's args
         assert_eq!(
-            routed(&manager, &["git", "snapshot", "create", "x"]),
+            routed(&manager, &["git", "worktree", "create", "x"]),
             Some(("git".to_string(), 3))
         );
         assert_eq!(
