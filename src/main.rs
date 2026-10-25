@@ -1273,6 +1273,8 @@ fn handle_plugin_command(
 /// subcommands (e.g. `worktree prune --dry-run`, `worktree exec --parallel`)
 /// define their own versions and need to see them.
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
+    // Everything from `--` on belongs to the command, untouched
+    let rest = args.split_off(args.iter().position(|a| a == "--").unwrap_or(args.len()));
     args.retain(|arg| {
         match arg.as_str() {
             "--json" => {
@@ -1302,6 +1304,7 @@ fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
             _ => true, // keep in args
         }
     });
+    args.extend(rest);
 }
 
 /// Check whether a project's tags match a comma-separated tag filter string.
@@ -1310,7 +1313,6 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
     tags.iter().any(|t| requested.contains(&t.as_str()))
 }
 
-/// Convert an empty Vec into None, non-empty into Some.
 /// The repos among `dirs` that `--include`/`--exclude` select (see
 /// [`repo_filter::select`]); `names` lists the `.meta` names they may use.
 fn select_repos(
