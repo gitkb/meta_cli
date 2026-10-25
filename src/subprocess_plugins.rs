@@ -55,20 +55,26 @@ impl SubprocessPluginManager {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
-        // ~/.meta/plugins/ is refused when another user could write to it. The
-        // walk up from cwd passes through it from anywhere under $HOME, so
-        // mark it visited to keep that walk from running what it holds.
-        let global_plugins = meta_core::data_dir::data_subdir("plugins");
-        if let Err(e) = &global_plugins {
-            eprintln!(
-                "warning: skipping global plugins: {}",
-                escape_lines(&format!("{e:#}"))
-            );
-            if let Ok(dir) = meta_core::meta_dir() {
-                let refused = dir.join("plugins");
-                visited.insert(refused.canonicalize().unwrap_or(refused));
-            }
-        }
+        // ~/.meta/plugins/, when it exists, is refused if another user could
+        // write to it. The walk up from cwd passes through it from anywhere
+        // under $HOME, so a refused one is marked visited to keep that walk
+        // from running what it holds. No home, or no plugins dir, just means
+        // no global plugins.
+        let global_plugins = meta_core::meta_dir()
+            .ok()
+            .map(|dir| dir.join("plugins"))
+            .filter(|dir| dir.is_dir())
+            .filter(|dir| match meta_core::data_dir::check_private_dir(dir) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping global plugins: {}",
+                        escape_lines(&format!("{e:#}"))
+                    );
+                    visited.insert(dir.canonicalize().unwrap_or(dir.clone()));
+                    false
+                }
+            });
 
         // Search in .meta/plugins/ directories walking up from cwd (project-local)
         let mut current_dir = std::env::current_dir()?;
@@ -96,7 +102,7 @@ impl SubprocessPluginManager {
         }
 
         // Search in ~/.meta/plugins/ (global installed)
-        if let Ok(global_plugins) = global_plugins {
+        if let Some(global_plugins) = global_plugins {
             if visited.insert(
                 global_plugins
                     .canonicalize()

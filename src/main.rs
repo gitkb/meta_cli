@@ -1141,7 +1141,12 @@ fn handle_plugin_command(
                         // For local plugins, show the path in the local plugins dir
                         let cwd = std::env::current_dir()?;
                         let path = cwd.join(".meta/plugins").join(&plugin.name);
-                        println!("{:<12} {:<12} {}", name, version, path.display());
+                        println!(
+                            "{:<12} {:<12} {}",
+                            escape(name),
+                            escape(version),
+                            escape_path(&path)
+                        );
                     }
                 }
             } else {
@@ -1169,7 +1174,12 @@ fn handle_plugin_command(
                     println!("{:<12} {:<12} PATH", "NAME", "VERSION");
                     println!("{}", "-".repeat(70));
                     for (name, version, _, path) in &plugins {
-                        println!("{:<12} {:<12} {}", name, version, path.display());
+                        println!(
+                            "{:<12} {:<12} {}",
+                            escape(name),
+                            escape(version),
+                            escape_path(path)
+                        );
                     }
                 }
             }
