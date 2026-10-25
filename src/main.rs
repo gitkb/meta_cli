@@ -654,6 +654,9 @@ fn handle_command_dispatch(
         && command_args.get(1).map(|s| s == "clone").unwrap_or(false);
 
     if is_git_clone && !is_explicit_exec {
+        if cli.include.is_some() || cli.exclude.is_some() {
+            anyhow::bail!("meta git clone clones every repo in the meta repo; it does not take --include/--exclude");
+        }
         // Handle git clone directly via plugin without requiring .meta file
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
@@ -750,15 +753,9 @@ fn handle_command_dispatch(
                     );
                 }
 
-                let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
-                    // Nested names come from the tree only when no --config
-                    // picked a different file than the walk would find
-                    let tree = match (cli.config.as_ref(), config_path.parent()) {
-                        (None, Some(dir)) => config::walk_meta_tree(dir, None).unwrap_or_default(),
-                        _ => vec![],
-                    };
-                    repo_filter::repo_names(&meta_projects, &tree)
-                })?;
+                // A worktree member sits at its alias, so its path in the set
+                // is the name to select it by
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
 
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
@@ -914,7 +911,7 @@ fn handle_command_dispatch(
 
     // Commands and plugins get only the selected repos
     let project_paths = select_repos(cli, project_paths, meta_dir, || {
-        repo_filter::repo_names(&meta_projects, &tree)
+        repo_filter::repo_names(meta_dir, &meta_projects, &tree)
     })?;
 
     let config = loop_lib::LoopConfig {

@@ -4,21 +4,26 @@ use anyhow::{bail, Result};
 use meta_core::config::{MetaTreeNode, ProjectInfo};
 use std::path::{Component, Path};
 
-/// (`.meta` name, path from the meta root) for `projects`, and for every
-/// project nested under `tree` (the result of walking the same meta root).
-pub fn repo_names(projects: &[ProjectInfo], tree: &[MetaTreeNode]) -> Vec<(String, String)> {
-    fn walk(nodes: &[MetaTreeNode], prefix: &str, out: &mut Vec<(String, String)>) {
+/// (`.meta` name, path from `meta_dir`) for `projects`, and for every project
+/// nested under `tree` (the result of walking the same meta root). Paths are
+/// in the same form as [`select`] gives the repos it chooses among.
+pub fn repo_names(
+    meta_dir: &Path,
+    projects: &[ProjectInfo],
+    tree: &[MetaTreeNode],
+) -> Vec<(String, String)> {
+    fn walk(nodes: &[MetaTreeNode], dir: &Path, root: &Path, out: &mut Vec<(String, String)>) {
         for node in nodes {
-            let path = normalize(&Path::new(prefix).join(&node.info.path).to_string_lossy());
-            out.push((node.info.name.clone(), path.clone()));
-            walk(&node.children, &path, out);
+            let path = dir.join(&node.info.path);
+            out.push((node.info.name.clone(), repo_path(&path, root)));
+            walk(&node.children, &path, root, out);
         }
     }
     let mut names: Vec<(String, String)> = projects
         .iter()
-        .map(|p| (p.name.clone(), normalize(&p.path)))
+        .map(|p| (p.name.clone(), repo_path(&meta_dir.join(&p.path), meta_dir)))
         .collect();
-    walk(tree, "", &mut names);
+    walk(tree, meta_dir, meta_dir, &mut names);
     names
 }
 
@@ -40,26 +45,40 @@ pub fn select(
     if include.is_empty() && exclude.is_empty() {
         return Ok(dirs.to_vec());
     }
-    let paths: Vec<String> = dirs.iter().map(|dir| repo_path(dir, root)).collect();
+    let paths: Vec<String> = dirs
+        .iter()
+        .map(|dir| repo_path(Path::new(dir), root))
+        .collect();
     let named = |flag: &str, value: &str| -> Result<Vec<&str>> {
         let wanted = path_value(value);
-        let hits: Vec<&str> = paths
+        let is_name = |name: &String| name == value || wanted.as_deref() == Some(name.as_str());
+        let by_path: Vec<&str> = paths
             .iter()
-            .filter(|path| {
-                wanted.as_deref() == Some(path.as_str())
-                    || names.iter().any(|(name, p)| {
-                        (name == value || wanted.as_deref() == Some(name.as_str())) && p == *path
-                    })
-            })
+            .filter(|path| wanted.as_deref() == Some(path.as_str()))
             .map(String::as_str)
             .collect();
-        if hits.is_empty() {
+        let by_name: Vec<&str> = paths
+            .iter()
+            .filter(|path| names.iter().any(|(name, p)| is_name(name) && p == *path))
+            .map(String::as_str)
+            .collect();
+        if !by_path.is_empty() && !by_name.is_empty() && by_path != by_name {
             bail!(
-                "{flag} '{value}' names no repo here. Use a repo's name from .meta or its path \
-                 from the workspace root (`.` for the root), as `meta project list` shows it."
+                "{flag} '{value}' is the path of {} and the .meta name of {}; name the repo by \
+                 its path",
+                by_path.join(", "),
+                by_name.join(", ")
             );
         }
-        Ok(hits)
+        if by_path.is_empty() && by_name.is_empty() {
+            bail!(
+                "{flag} '{value}' names none of the repos this command runs in. Use a repo's \
+                 name from .meta or its path from the workspace root (`.` for the root), as \
+                 `meta project list` shows it; in a worktree set, its alias. --tag and \
+                 --recursive change which repos the command runs in."
+            );
+        }
+        Ok(if by_path.is_empty() { by_name } else { by_path })
     };
     let mut included = Vec::new();
     for value in include {
@@ -85,16 +104,16 @@ pub fn select(
 /// `dir`'s path from `root`, `/`-separated and `.` for the root itself; `dir`
 /// as given when it is not under `root`. A relative `dir` is taken from the
 /// current directory.
-fn repo_path(dir: &str, root: &Path) -> String {
+fn repo_path(dir: &Path, root: &Path) -> String {
     let absolute = std::env::current_dir()
         .map(|cwd| cwd.join(dir))
-        .unwrap_or_else(|_| dir.into());
+        .unwrap_or_else(|_| dir.to_path_buf());
     match absolute.strip_prefix(root) {
         Ok(rel) => match normalize(&rel.to_string_lossy()) {
             rel if rel.is_empty() => ".".to_string(),
             rel => rel,
         },
-        Err(_) => dir.to_string(),
+        Err(_) => dir.display().to_string(),
     }
 }
 
@@ -152,7 +171,7 @@ mod tests {
             .iter()
             .map(|rel| root.join(rel).display().to_string())
             .collect();
-        let names = repo_names(&[project("core-lib", "./libs/core/")], &[]);
+        let names = repo_names(&root, &[project("core-lib", "./libs/core/")], &[]);
         let select = |include: &[&str], exclude: &[&str]| {
             select(&strings(include), &strings(exclude), &dirs, &root, &names)
         };
@@ -178,7 +197,7 @@ mod tests {
         let absolute = root.join("api").display().to_string();
         for value in ["a", "ap", "core", "ws", absolute.as_str(), ""] {
             let err = select(&[value], &[]).unwrap_err().to_string();
-            assert!(err.contains("names no repo"), "{value}: {err}");
+            assert!(err.contains("names none of the repos"), "{value}: {err}");
             let err = select(&[], &[value]).unwrap_err().to_string();
             assert!(err.contains("--exclude"), "{value}: {err}");
         }
@@ -195,6 +214,7 @@ mod tests {
             .map(|rel| root.join(rel).display().to_string())
             .collect();
         let names = repo_names(
+            &root,
             &[project("parent", ".."), project("outer", "libs/../api")],
             &[],
         );
@@ -225,10 +245,44 @@ mod tests {
             project("top", "parent"),
             vec![node(project("core-lib", "./libs/core"), vec![])],
         )];
-        let names = repo_names(&[], &tree);
+        let names = repo_names(&root, &[], &tree);
         for (value, rel) in [("top", "parent"), ("core-lib", "parent/libs/core")] {
             let chosen = select(&strings(&[value]), &[], &dirs, &root, &names).unwrap();
             assert_eq!(chosen, [root.join(rel).display().to_string()], "{value}");
         }
+    }
+
+    #[test]
+    fn absolute_paths_and_ambiguous_names() {
+        let root = std::env::temp_dir().join("ws").join("a");
+        let outside = std::env::temp_dir().join("elsewhere");
+        let dirs: Vec<String> = [
+            root.join("libs/core"),
+            root.join("web"),
+            root.join("frontend"),
+            outside.clone(),
+        ]
+        .iter()
+        .map(|dir| dir.display().to_string())
+        .collect();
+        let absolute = |dir: &std::path::Path| dir.display().to_string();
+        let names = repo_names(
+            &root,
+            &[
+                project("core-lib", &absolute(&root.join("libs/core"))),
+                project("far", &absolute(&outside)),
+                project("web", "frontend"),
+            ],
+            &[],
+        );
+        let select = |value: &str| select(&strings(&[value]), &[], &dirs, &root, &names);
+        assert_eq!(select("core-lib").unwrap(), [dirs[0].clone()]);
+        assert_eq!(select("far").unwrap(), [dirs[3].clone()]);
+        // `web` is one repo's path and another's name
+        let err = select("web").unwrap_err().to_string();
+        assert!(
+            err.contains("is the path of web and the .meta name of frontend"),
+            "{err}"
+        );
     }
 }
