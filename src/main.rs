@@ -654,7 +654,7 @@ fn handle_command_dispatch(
         log::debug!(
             "parallel={} (from config defaults, cwd={})",
             defaults.parallel,
-            cwd.display()
+            escape_path(&cwd)
         );
         defaults.parallel
     };
