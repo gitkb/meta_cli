@@ -4,7 +4,12 @@
 //! Uncomment them when running full integration tests.
 
 use std::fs;
+use std::path::Path;
 use tempfile::tempdir;
+
+fn touch(path: &Path) -> Vec<String> {
+    vec!["touch".to_string(), path.display().to_string()]
+}
 
 /// Test that loop_lib properly respects dry_run flag throughout the execution chain
 #[test]
@@ -22,7 +27,7 @@ fn test_dry_run_integration_loop_lib() {
         ..Default::default()
     };
 
-    let cmd = format!("touch {}", marker_file.display());
+    let cmd = touch(&marker_file);
     let result = run(&config, &cmd);
     assert!(result.is_ok(), "dry_run should succeed");
     assert!(
@@ -34,7 +39,7 @@ fn test_dry_run_integration_loop_lib() {
     let marker_file2 = dir.path().join("also_should_not_exist.txt");
     let commands = vec![DirCommand {
         dir: dir.path().to_str().unwrap().to_string(),
-        cmd: format!("touch {}", marker_file2.display()),
+        argv: touch(&marker_file2),
         env: None,
     }];
 
@@ -57,8 +62,6 @@ fn test_loop_config_full_serialization_round_trip() {
         verbose: true,
         silent: false,
         add_aliases_to_global_looprc: false,
-        include_filters: Some(vec!["frontend".to_string()]),
-        exclude_filters: Some(vec!["tests".to_string()]),
         parallel: true,
         dry_run: true,
         json_output: true,
@@ -75,8 +78,6 @@ fn test_loop_config_full_serialization_round_trip() {
     assert_eq!(restored.ignore, config.ignore);
     assert_eq!(restored.verbose, config.verbose);
     assert_eq!(restored.silent, config.silent);
-    assert_eq!(restored.include_filters, config.include_filters);
-    assert_eq!(restored.exclude_filters, config.exclude_filters);
     assert_eq!(restored.parallel, config.parallel);
     assert_eq!(restored.dry_run, config.dry_run);
     assert_eq!(restored.json_output, config.json_output);
@@ -106,12 +107,12 @@ fn test_different_commands_per_directory() {
     let commands = vec![
         DirCommand {
             dir: dir1.to_str().unwrap().to_string(),
-            cmd: format!("touch {}", file1.display()),
+            argv: touch(&file1),
             env: None,
         },
         DirCommand {
             dir: dir2.to_str().unwrap().to_string(),
-            cmd: format!("touch {}", file2.display()),
+            argv: touch(&file2),
             env: None,
         },
     ];
@@ -131,8 +132,8 @@ fn test_execution_plan_protocol_compatibility() {
     let plugin_output = r#"{
         "plan": {
             "commands": [
-                {"dir": "./repo1", "cmd": "git status"},
-                {"dir": "./repo2", "cmd": "git status"}
+                {"dir": "./repo1", "argv": ["git", "status"]},
+                {"dir": "./repo2", "argv": ["git", "status"]}
             ],
             "parallel": false
         }
@@ -143,9 +144,9 @@ fn test_execution_plan_protocol_compatibility() {
 
     assert_eq!(response.plan.commands.len(), 2);
     assert_eq!(response.plan.commands[0].dir, "./repo1");
-    assert_eq!(response.plan.commands[0].cmd, "git status");
+    assert_eq!(response.plan.commands[0].argv, ["git", "status"]);
     assert_eq!(response.plan.commands[1].dir, "./repo2");
-    assert_eq!(response.plan.commands[1].cmd, "git status");
+    assert_eq!(response.plan.commands[1].argv, ["git", "status"]);
     assert_eq!(response.plan.parallel, Some(false));
 }
 
@@ -196,26 +197,6 @@ fn test_plugin_request_options_silent_and_filters() {
     assert!(json.contains("tests"));
 }
 
-/// Test that DirCommand properly converts to loop_lib format
-#[test]
-fn test_dir_command_conversion() {
-    use loop_lib::DirCommand as LoopDirCommand;
-
-    // Simulate what the plugin returns (as JSON)
-    let planned_json = r#"{"dir": "/home/user/project", "cmd": "npm install"}"#;
-    let parsed: serde_json::Value = serde_json::from_str(planned_json).unwrap();
-
-    // subprocess_plugins converts it to loop_lib format
-    let loop_cmd = LoopDirCommand {
-        dir: parsed["dir"].as_str().unwrap().to_string(),
-        cmd: parsed["cmd"].as_str().unwrap().to_string(),
-        env: None,
-    };
-
-    assert_eq!(loop_cmd.dir, "/home/user/project");
-    assert_eq!(loop_cmd.cmd, "npm install");
-}
-
 /// Test that parallel execution works correctly with different commands
 #[test]
 fn test_parallel_execution_with_different_commands() {
@@ -244,7 +225,7 @@ fn test_parallel_execution_with_different_commands() {
             let file = d.join(format!("file{i}.txt"));
             DirCommand {
                 dir: d.to_str().unwrap().to_string(),
-                cmd: format!("touch {}", file.display()),
+                argv: touch(&file),
                 env: None,
             }
         })
@@ -296,8 +277,6 @@ fn test_backward_compatibility_config_parsing() {
     assert!(!config.dry_run);
     assert!(!config.json_output);
     assert!(!config.parallel);
-    assert!(config.include_filters.is_none());
-    assert!(config.exclude_filters.is_none());
 }
 
 /*

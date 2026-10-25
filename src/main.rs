@@ -11,7 +11,7 @@ use std::path::PathBuf;
 mod init;
 mod registry;
 mod subprocess_plugins;
-use meta_cli::worktree;
+use meta_cli::{repo_filter, worktree};
 use subprocess_plugins::{PluginRequestOptions, SubprocessPluginManager};
 
 // === CLI Structs ===
@@ -47,7 +47,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Specify directories to exclude"
+        help = "Skip these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
     )]
     exclude: Option<Vec<String>>,
 
@@ -56,7 +56,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Specify directories to include"
+        help = "Only run in these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
     )]
     include: Option<Vec<String>>,
 
@@ -523,12 +523,18 @@ fn main() -> Result<()> {
                 println!();
                 println!("The command runs as typed in each project directory defined in .meta,");
                 println!("never through a plugin (use `meta git ...` for the git plugin).");
+                println!("No shell parses it: each argument reaches the program as given, so");
+                println!("quotes, $(), ;, | and globs stay literal. For a shell, ask for one.");
+                println!();
+                println!("--include/--exclude take repos by .meta name or path from the root");
+                println!("(. for the root), never part of a path.");
                 println!();
                 println!("Examples:");
                 println!("  meta exec -- npm install");
                 println!("  meta exec -- cargo fmt --check");
                 println!("  meta exec -- make clean");
-                println!("  meta exec --include api,web -- docker-compose up -d");
+                println!("  meta --include api,web exec -- docker-compose up -d");
+                println!("  meta exec -- sh -c 'npm ci && npm test'");
                 std::process::exit(0);
             }
             handle_command_dispatch(args.command, &cli, &subprocess_plugins, true)
@@ -543,7 +549,11 @@ fn main() -> Result<()> {
             // Keep root plugin help fast and plugin-aware, but let nested help
             // requests reach the matched plugin command implementation.
             if let Some(first) = args.first() {
-                let wants_help = args.iter().any(|a| a == "--help" || a == "-h");
+                // A --help after `--` is an argument for the command
+                let wants_help = args
+                    .iter()
+                    .take_while(|a| *a != "--")
+                    .any(|a| a == "--help" || a == "-h");
                 let is_bare = args.len() == 1;
                 let is_root_help = wants_help
                     && args.len() == 2
@@ -604,7 +614,7 @@ fn handle_command_dispatch(
     if command_args.is_empty() {
         if is_explicit_exec {
             // Show usage error (help is handled at the caller level via cli.help)
-            eprintln!("Usage: meta exec <command> [args...]");
+            eprintln!("Usage: meta exec -- <command> [args...]");
         } else {
             print_help_with_plugins(plugins, true);
         }
@@ -614,8 +624,6 @@ fn handle_command_dispatch(
     // All meta flags come from clap globals (before the command).
     // Command args pass through untouched to avoid collisions with
     // identically-named flags (e.g., grep --include, git clone --depth).
-    let include_filters: Vec<String> = cli.include.clone().unwrap_or_default();
-    let exclude_filters: Vec<String> = cli.exclude.clone().unwrap_or_default();
     let recursive = cli.recursive;
     let dry_run = cli.dry_run;
     let depth = cli.depth;
@@ -638,7 +646,7 @@ fn handle_command_dispatch(
         defaults.parallel
     };
 
-    let command_str = command_args.join(" ");
+    let command_str = loop_lib::display_command(&command_args);
 
     // Check if this is `git clone` - it doesn't require a .meta file because
     // its purpose is to clone the repo that contains the .meta file
@@ -646,6 +654,9 @@ fn handle_command_dispatch(
         && command_args.get(1).map(|s| s == "clone").unwrap_or(false);
 
     if is_git_clone && !is_explicit_exec {
+        if cli.include.is_some() || cli.exclude.is_some() {
+            anyhow::bail!("meta git clone clones every repo in the meta repo; it does not take --include/--exclude");
+        }
         // Handle git clone directly via plugin without requiring .meta file
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
@@ -723,6 +734,10 @@ fn handle_command_dispatch(
                     .map(|p| p.display().to_string())
                     .collect();
 
+                // A worktree member sits at its alias, so its path in the set
+                // is the name to select it by
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
+
                 if wt_directories.is_empty() {
                     eprintln!(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
@@ -742,14 +757,9 @@ fn handle_command_dispatch(
                     );
                 }
 
-                let include_opt = none_if_empty(include_filters.clone());
-                let exclude_opt = none_if_empty(exclude_filters.clone());
-
                 let config = loop_lib::LoopConfig {
                     directories: wt_directories.clone(),
                     ignore: ignore_list,
-                    include_filters: include_opt.clone(),
-                    exclude_filters: exclude_opt.clone(),
                     verbose: cli.verbose,
                     silent: cli.silent,
                     parallel,
@@ -771,13 +781,13 @@ fn handle_command_dispatch(
                     silent: cli.silent,
                     recursive,
                     depth,
-                    include_filters: include_opt,
-                    exclude_filters: exclude_opt,
+                    include_filters: cli.include.clone(),
+                    exclude_filters: cli.exclude.clone(),
                     strict: cli.strict,
                 };
 
                 if is_explicit_exec {
-                    run(&config, &command_str)?;
+                    run(&config, &command_args)?;
                 } else if plugins.execute(
                     &command_args,
                     &wt_directories,
@@ -808,14 +818,11 @@ fn handle_command_dispatch(
             let directories: Vec<String> =
                 wt_paths.iter().map(|p| p.display().to_string()).collect();
 
-            let include_opt = none_if_empty(include_filters);
-            let exclude_opt = none_if_empty(exclude_filters);
+            let directories = select_repos(cli, directories, &task_dir, Vec::new)?;
 
             let config = loop_lib::LoopConfig {
                 directories,
                 ignore: vec![],
-                include_filters: include_opt,
-                exclude_filters: exclude_opt,
                 verbose: cli.verbose,
                 silent: cli.silent,
                 parallel, // Use the determined parallel mode, not hardcoded false
@@ -828,7 +835,7 @@ fn handle_command_dispatch(
                 root_dir: Some(task_dir.clone()),
             };
 
-            run(&config, &command_str)?;
+            run(&config, &command_args)?;
             return Ok(());
         }
     }
@@ -882,12 +889,18 @@ fn handle_command_dispatch(
     );
 
     // If recursive mode is enabled, discover nested meta repos
+    let mut tree = vec![];
     if recursive {
         if cli.verbose {
             let depth_str = depth.map_or("unlimited".to_string(), |d| d.to_string());
             println!("Recursive mode enabled, max depth: {depth_str}");
         }
-        let tree = config::walk_meta_tree(meta_dir, depth)?;
+        // The walk reads the default config file; with --config, start from
+        // the chosen one and walk only the nested meta repos
+        tree = match cli.config {
+            Some(_) => walk_from(meta_dir, &meta_projects, depth),
+            None => config::walk_meta_tree(meta_dir, depth)?,
+        };
         project_paths = vec![meta_dir_str.clone()];
         let flat = flatten_with_tag_filter(&tree, &cli.tag);
         project_paths.extend(
@@ -896,16 +909,15 @@ fn handle_command_dispatch(
         );
     }
 
-    // Prepare filter options (shared by both LoopConfig and PluginRequestOptions)
-    let include_opt = none_if_empty(include_filters);
-    let exclude_opt = none_if_empty(exclude_filters);
+    // Commands and plugins get only the selected repos
+    let project_paths = select_repos(cli, project_paths, meta_dir, || {
+        repo_filter::repo_names(meta_dir, &meta_projects, &tree)
+    })?;
 
     let config = loop_lib::LoopConfig {
         add_aliases_to_global_looprc: cli.add_aliases_to_global_looprc,
         directories: project_paths.clone(),
         ignore: ignore_list,
-        include_filters: include_opt.clone(),
-        exclude_filters: exclude_opt.clone(),
         verbose: cli.verbose,
         silent: cli.silent,
         parallel,
@@ -926,8 +938,8 @@ fn handle_command_dispatch(
         silent: cli.silent,
         recursive,
         depth,
-        include_filters: include_opt,
-        exclude_filters: exclude_opt,
+        include_filters: cli.include.clone(),
+        exclude_filters: cli.exclude.clone(),
         strict: cli.strict,
     };
 
@@ -937,7 +949,7 @@ fn handle_command_dispatch(
         if cli.verbose {
             println!("{}", "Running command via loop (explicit exec).".green());
         }
-        run(&config, &command_str)?;
+        run(&config, &command_args)?;
     } else if plugins.execute(
         &command_args,
         &project_paths,
@@ -1267,6 +1279,8 @@ fn handle_plugin_command(
 /// subcommands (e.g. `worktree prune --dry-run`, `worktree exec --parallel`)
 /// define their own versions and need to see them.
 fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
+    // Everything from `--` on belongs to the command, untouched
+    let rest = args.split_off(args.iter().position(|a| a == "--").unwrap_or(args.len()));
     args.retain(|arg| {
         match arg.as_str() {
             "--json" => {
@@ -1296,6 +1310,7 @@ fn extract_global_flags(args: &mut Vec<String>, cli: &mut Cli) {
             _ => true, // keep in args
         }
     });
+    args.extend(rest);
 }
 
 /// Check whether a project's tags match a comma-separated tag filter string.
@@ -1304,13 +1319,20 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
     tags.iter().any(|t| requested.contains(&t.as_str()))
 }
 
-/// Convert an empty Vec into None, non-empty into Some.
-fn none_if_empty(v: Vec<String>) -> Option<Vec<String>> {
-    if v.is_empty() {
-        None
-    } else {
-        Some(v)
+/// The repos among `dirs` that `--include`/`--exclude` select (see
+/// [`repo_filter::select`]); `names` lists the `.meta` names they may use.
+fn select_repos(
+    cli: &Cli,
+    dirs: Vec<String>,
+    root: &std::path::Path,
+    names: impl FnOnce() -> Vec<(String, String)>,
+) -> Result<Vec<String>> {
+    let include = cli.include.clone().unwrap_or_default();
+    let exclude = cli.exclude.clone().unwrap_or_default();
+    if include.is_empty() && exclude.is_empty() {
+        return Ok(dirs);
     }
+    repo_filter::select(&include, &exclude, &dirs, root, &names())
 }
 
 /// Print unrecognized command error with suggestion and help, then exit.
@@ -1327,7 +1349,7 @@ fn unrecognized_command_error(
     );
     eprintln!();
     eprintln!("To run '{command_str}' across all repos:");
-    eprintln!("    meta exec {command_str}");
+    eprintln!("    meta exec -- {command_str}");
     eprintln!();
     print_help_with_plugins(plugins, true);
     std::process::exit(1);
@@ -1392,6 +1414,53 @@ fn check_and_warn_orphan() {
         }
         eprintln!();
     }
+}
+
+/// The meta tree whose top level is `projects` (from the config the user
+/// chose), walked the way `walk_meta_tree` walks the default config: nested
+/// meta repos `depth` levels down, each directory expanded at most once.
+fn walk_from(
+    meta_dir: &std::path::Path,
+    projects: &[ProjectInfo],
+    depth: Option<usize>,
+) -> Vec<MetaTreeNode> {
+    fn walk(
+        dir: &std::path::Path,
+        projects: &[ProjectInfo],
+        depth: Option<usize>,
+        visited: &mut std::collections::HashSet<PathBuf>,
+    ) -> Vec<MetaTreeNode> {
+        let mut nodes: Vec<MetaTreeNode> = projects
+            .iter()
+            .map(|project| {
+                let project_dir = dir.join(&project.path);
+                let config = find_meta_config(&project_dir, None).filter(|(path, _)| {
+                    project_dir.is_dir() && path.parent() == Some(&project_dir)
+                });
+                let canonical = project_dir.canonicalize().unwrap_or(project_dir.clone());
+                let children = match &config {
+                    Some((path, _)) if depth != Some(0) && visited.insert(canonical) => {
+                        parse_meta_config(path)
+                            .map(|(nested, _)| {
+                                let depth = depth.map(|d| d.saturating_sub(1));
+                                walk(&project_dir, &nested, depth, visited)
+                            })
+                            .unwrap_or_default()
+                    }
+                    _ => vec![],
+                };
+                MetaTreeNode {
+                    info: project.clone(),
+                    is_meta: config.is_some(),
+                    children,
+                }
+            })
+            .collect();
+        nodes.sort_by(|a, b| a.info.name.cmp(&b.info.name));
+        nodes
+    }
+    let root = meta_dir.canonicalize().unwrap_or(meta_dir.to_path_buf());
+    walk(meta_dir, projects, depth, &mut [root].into_iter().collect())
 }
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.
