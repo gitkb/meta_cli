@@ -2,7 +2,7 @@
 
 use anyhow::{bail, Result};
 use meta_core::config::{MetaTreeNode, ProjectInfo};
-use std::path::{Component, Path};
+use std::path::{Component, Path, PathBuf};
 
 /// (`.meta` name, path from `meta_dir`) for `projects`, and for every project
 /// nested under `tree` (the result of walking the same meta root). Paths are
@@ -31,10 +31,12 @@ pub fn repo_names(
 ///
 /// A value names a repo by its `.meta` name (from `names`, see
 /// [`repo_names`]) or by its whole path from `root` (`.` for the root; a
-/// leading `./` and a trailing `/` are ignored), never by a part of either.
-/// A value that names none of `dirs` is an error, so a typo never runs a
-/// command in a repo it was meant to leave out; so is a selection that leaves
-/// no repo.
+/// trailing `/` is ignored), never by a part of either. A value starting with
+/// `./` is a path only. Repos are compared as directories, so excluding one
+/// excludes every spelling of it (`api` and `libs/../api`). A value that names
+/// none of `dirs` is an error, so a typo never runs a command in a repo it was
+/// meant to leave out; so is a value that names several repos, and a selection
+/// that leaves no repo.
 pub fn select(
     include: &[String],
     exclude: &[String],
@@ -45,38 +47,55 @@ pub fn select(
     if include.is_empty() && exclude.is_empty() {
         return Ok(dirs.to_vec());
     }
-    let paths: Vec<String> = dirs
+    let repos: Vec<Repo> = dirs
         .iter()
-        .map(|dir| repo_path(Path::new(dir), root))
+        .map(|dir| Repo {
+            dir,
+            path: repo_path(Path::new(dir), root),
+            id: std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)),
+        })
         .collect();
-    let named = |flag: &str, value: &str| -> Result<Vec<&str>> {
+    let named = |flag: &str, value: &str| -> Result<Vec<&Path>> {
         let wanted = path_value(value);
-        let is_name = |name: &String| name == value || wanted.as_deref() == Some(name.as_str());
-        let by_path: Vec<&str> = paths
-            .iter()
-            .filter(|path| wanted.as_deref() == Some(path.as_str()))
-            .map(String::as_str)
-            .collect();
-        let by_name: Vec<&str> = paths
-            .iter()
-            .filter(|path| names.iter().any(|(name, p)| is_name(name) && p == *path))
-            .map(String::as_str)
-            .collect();
+        let by_path = distinct(
+            repos
+                .iter()
+                .filter(|r| wanted.as_deref() == Some(r.path.as_str())),
+        );
+        let by_name = if value.starts_with("./") {
+            vec![]
+        } else {
+            distinct(
+                repos
+                    .iter()
+                    .filter(|r| names.iter().any(|(name, p)| name == value && *p == r.path)),
+            )
+        };
+        let listed = |repos: &[&Repo]| -> String {
+            repos
+                .iter()
+                .map(|r| r.path.as_str())
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
         if by_name.len() > 1 {
             bail!(
-                "{flag} '{value}' is the .meta name of {}; name the repo by its path",
-                by_name.join(", ")
+                "{flag} '{value}' is the .meta name of {}; name the repo by its path, as ./<path>",
+                listed(&by_name)
             );
         }
-        if !by_path.is_empty() && !by_name.is_empty() && by_path != by_name {
+        let ids =
+            |repos: &[&Repo]| -> Vec<PathBuf> { repos.iter().map(|r| r.id.clone()).collect() };
+        if !by_path.is_empty() && !by_name.is_empty() && ids(&by_path) != ids(&by_name) {
             bail!(
                 "{flag} '{value}' is the path of {} and the .meta name of {}; name the repo by \
-                 its path",
-                by_path.join(", "),
-                by_name.join(", ")
+                 its path, as ./<path>",
+                listed(&by_path),
+                listed(&by_name)
             );
         }
-        if by_path.is_empty() && by_name.is_empty() {
+        let hits = if by_path.is_empty() { by_name } else { by_path };
+        if hits.is_empty() {
             bail!(
                 "{flag} '{value}' names none of the repos this command runs in. Use a repo's \
                  name from .meta or its path from the workspace root (`.` for the root), as \
@@ -84,7 +103,7 @@ pub fn select(
                  --recursive change which repos the command runs in."
             );
         }
-        Ok(if by_path.is_empty() { by_name } else { by_path })
+        Ok(hits.iter().map(|r| r.id.as_path()).collect())
     };
     let mut included = Vec::new();
     for value in include {
@@ -94,17 +113,35 @@ pub fn select(
     for value in exclude {
         excluded.extend(named("--exclude", value)?);
     }
-    let selected: Vec<String> = dirs
+    let selected: Vec<String> = repos
         .iter()
-        .zip(&paths)
-        .filter(|(_, path)| include.is_empty() || included.contains(&path.as_str()))
-        .filter(|(_, path)| !excluded.contains(&path.as_str()))
-        .map(|(dir, _)| dir.clone())
+        .filter(|r| include.is_empty() || included.contains(&r.id.as_path()))
+        .filter(|r| !excluded.contains(&r.id.as_path()))
+        .map(|r| r.dir.clone())
         .collect();
     if selected.is_empty() {
         bail!("--include/--exclude leave no repo to run in");
     }
     Ok(selected)
+}
+
+/// A repo `select` chooses among: as given, as filters name it, and the
+/// directory it is.
+struct Repo<'a> {
+    dir: &'a String,
+    path: String,
+    id: PathBuf,
+}
+
+/// `repos` with each directory once.
+fn distinct<'a>(repos: impl Iterator<Item = &'a Repo<'a>>) -> Vec<&'a Repo<'a>> {
+    let mut out: Vec<&Repo> = Vec::new();
+    for repo in repos {
+        if !out.iter().any(|r| r.id == repo.id) {
+            out.push(repo);
+        }
+    }
+    out
 }
 
 /// `dir`'s path from `root`, `/`-separated and `.` for the root itself; `dir`
@@ -197,7 +234,9 @@ mod tests {
         assert_eq!(picked(&["."], &[]), ["."]);
         assert_eq!(picked(&["libs/core"], &[]), ["libs/core"]);
         assert_eq!(picked(&["core-lib"], &[]), ["libs/core"]);
-        assert_eq!(picked(&["./core-lib/"], &[]), ["libs/core"]);
+        // `./` makes a value a path only
+        assert_eq!(picked(&["./libs/core/"], &[]), ["libs/core"]);
+        assert!(select(&["./core-lib"], &[]).is_err());
         assert_eq!(picked(&[], &["api"]), [".", "api-legacy", "libs/core"]);
         assert_eq!(picked(&["api", "api-legacy"], &["api"]), ["api-legacy"]);
         assert_eq!(picked(&[], &[]), [".", "api", "api-legacy", "libs/core"]);
@@ -214,27 +253,36 @@ mod tests {
     }
 
     #[test]
-    fn parent_parts_keep_different_repos_apart() {
-        let root = std::env::temp_dir().join("ws").join("a");
-        let rels = ["", "..", "api", "libs/../api"];
+    fn repos_are_directories_not_spellings() {
+        let temp = tempfile::tempdir().unwrap();
+        let root = temp.path().join("ws");
+        for dir in ["api", "libs", "child"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let rels = ["", "api", "libs/../api", "child/.."];
         let dirs: Vec<String> = rels
             .iter()
             .map(|rel| root.join(rel).display().to_string())
             .collect();
-        let names = repo_names(
-            &root,
-            &[project("parent", ".."), project("outer", "libs/../api")],
-            &[],
-        );
-        for (value, rel) in [
-            (".", ""),
-            ("parent", ".."),
-            ("api", "api"),
-            ("outer", "libs/../api"),
-        ] {
-            let chosen = select(&strings(&[value]), &[], &dirs, &root, &names).unwrap();
-            assert_eq!(chosen, [root.join(rel).display().to_string()], "{value}");
-        }
+        let names = repo_names(&root, &[project("outer", "libs/../api")], &[]);
+        let picked = |include: &[&str], exclude: &[&str]| -> Vec<&str> {
+            let chosen =
+                select(&strings(include), &strings(exclude), &dirs, &root, &names).unwrap();
+            rels.iter()
+                .zip(&dirs)
+                .filter(|(_, dir)| chosen.contains(dir))
+                .map(|(rel, _)| *rel)
+                .collect()
+        };
+        // Excluding a repo excludes every spelling of its directory
+        assert_eq!(picked(&[], &["api"]), ["", "child/.."]);
+        assert_eq!(picked(&[], &["."]), ["api", "libs/../api"]);
+        assert_eq!(picked(&["outer"], &[]), ["api", "libs/../api"]);
+        // `..` is kept: the workspace's parent is not the workspace
+        let parent = repo_names(&root, &[project("parent", "..")], &[]);
+        let up = [root.join("..").display().to_string()];
+        let err = select(&strings(&["."]), &[], &up, &root, &parent).unwrap_err();
+        assert!(err.to_string().contains("names none"), "{err}");
     }
 
     #[test]
@@ -297,21 +345,20 @@ mod tests {
     #[test]
     fn a_name_shared_by_two_repos_is_ambiguous_and_relative_roots_work() {
         let root = std::path::PathBuf::from("ws-relative");
-        let dirs: Vec<String> = ["a/api", "b/api"]
+        let dirs: Vec<String> = ["api", "group/api"]
             .iter()
             .map(|rel| root.join(rel).display().to_string())
             .collect();
         let names = repo_names(
             &root,
-            &[project("api", "a/api"), project("api", "b/api")],
+            &[project("api", "api"), project("api", "group/api")],
             &[],
         );
-        let err = select(&strings(&["api"]), &[], &dirs, &root, &names)
-            .unwrap_err()
-            .to_string();
-        assert!(err.contains("is the .meta name of a/api, b/api"), "{err}");
-        // Paths still pick one, with a relative root as with an absolute one
-        let chosen = select(&strings(&["b/api"]), &[], &dirs, &root, &names).unwrap();
-        assert_eq!(chosen, [dirs[1].clone()]);
+        let select = |value: &str| select(&strings(&[value]), &[], &dirs, &root, &names);
+        let err = select("api").unwrap_err().to_string();
+        assert!(err.contains("is the .meta name of api, group/api"), "{err}");
+        // A ./ path picks one, with a relative root as with an absolute one
+        assert_eq!(select("./api").unwrap(), [dirs[0].clone()]);
+        assert_eq!(select("group/api").unwrap(), [dirs[1].clone()]);
     }
 }
