@@ -5,6 +5,7 @@ use loop_lib::run;
 use meta_core::config::{
     self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
 };
+use meta_core::display::{escape, escape_path};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -700,7 +701,7 @@ fn handle_command_dispatch(
             if cli.verbose {
                 eprintln!(
                     "Detected worktree context: '{}' ({} repos)",
-                    task_name,
+                    escape(&task_name),
                     wt_paths.len()
                 );
             }
@@ -743,7 +744,7 @@ fn handle_command_dispatch(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
                         "warning".yellow().bold(),
                         cli.tag.as_deref().unwrap_or(""),
-                        task_name
+                        escape(&task_name)
                     );
                     return Ok(());
                 }
@@ -811,7 +812,7 @@ fn handle_command_dispatch(
                 eprintln!(
                     "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
                     "warning:".yellow().bold(),
-                    task_name
+                    escape(&task_name)
                 );
             }
 
@@ -1385,8 +1386,8 @@ fn check_and_warn_orphan() {
             "{}: This meta repo is not tracked by its parent.",
             "warning".yellow().bold()
         );
-        eprintln!("  Current: {}", warning.current.display());
-        eprintln!("  Parent:  {}", warning.parent.display());
+        eprintln!("  Current: {}", escape_path(&warning.current));
+        eprintln!("  Parent:  {}", escape_path(&warning.parent));
         eprintln!();
 
         // Show format-appropriate syntax
@@ -1396,18 +1397,18 @@ fn check_and_warn_orphan() {
         };
         eprintln!(
             "  To include it, add to {}/{}:",
-            warning.parent.display(),
+            escape_path(&warning.parent),
             config_file
         );
         match warning.parent_format {
             ConfigFormat::Json => {
                 eprintln!(
                     "    \"{}\": {{ \"repo\": \"<git-url>\", \"meta\": true }}",
-                    warning.suggested_key
+                    escape(&warning.suggested_key)
                 );
             }
             ConfigFormat::Yaml => {
-                eprintln!("    {}:", warning.suggested_key);
+                eprintln!("    {}:", escape(&warning.suggested_key));
                 eprintln!("      repo: <git-url>");
                 eprintln!("      meta: true");
             }
@@ -1559,7 +1560,7 @@ mod tests {
 
         let api = &projects[0];
         assert_eq!(api.name, "api");
-        assert_eq!(api.path, "./services/api");
+        assert_eq!(api.path, "services/api"); // normalized
         assert_eq!(api.repo.as_ref().unwrap(), "git@github.com:org/api.git");
         assert_eq!(api.tags, vec!["backend", "rust"]);
     }
@@ -1622,7 +1623,7 @@ ignore:
         );
 
         let api = projects.iter().find(|p| p.name == "api").unwrap();
-        assert_eq!(api.path, "./backend/api");
+        assert_eq!(api.path, "backend/api"); // normalized
         assert_eq!(api.tags, vec!["backend", "python"]);
 
         assert_eq!(ignore, vec!["node_modules", "__pycache__"]);

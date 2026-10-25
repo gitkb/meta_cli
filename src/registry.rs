@@ -225,7 +225,7 @@ impl RegistryConfig {
 
     /// Get the config file path
     fn config_path() -> Result<PathBuf> {
-        Ok(meta_core::meta_dir().join("config.yaml"))
+        Ok(meta_core::meta_dir()?.join("config.yaml"))
     }
 
     /// Get list of registries (defaults to the public registry)

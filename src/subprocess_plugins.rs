@@ -65,11 +65,15 @@ impl SubprocessPluginManager {
             }
         }
 
-        // Search in ~/.meta/plugins/ (global installed)
-        if let Ok(global_plugins) = meta_core::data_dir::data_subdir("plugins") {
-            if global_plugins.exists() && visited.insert(global_plugins.clone()) {
-                self.scan_directory(&global_plugins)?;
+        // Search in ~/.meta/plugins/ (global installed), which is refused when
+        // another user could write to it
+        match meta_core::data_dir::data_subdir("plugins") {
+            Ok(global_plugins) => {
+                if visited.insert(global_plugins.clone()) {
+                    self.scan_directory(&global_plugins)?;
+                }
             }
+            Err(e) => eprintln!("warning: skipping global plugins: {e:#}"),
         }
 
         // Search in PATH for meta-* executables (bundled/system)
