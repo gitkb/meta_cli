@@ -62,6 +62,12 @@ pub fn select(
             .filter(|path| names.iter().any(|(name, p)| is_name(name) && p == *path))
             .map(String::as_str)
             .collect();
+        if by_name.len() > 1 {
+            bail!(
+                "{flag} '{value}' is the .meta name of {}; name the repo by its path",
+                by_name.join(", ")
+            );
+        }
         if !by_path.is_empty() && !by_name.is_empty() && by_path != by_name {
             bail!(
                 "{flag} '{value}' is the path of {} and the .meta name of {}; name the repo by \
@@ -102,13 +108,15 @@ pub fn select(
 }
 
 /// `dir`'s path from `root`, `/`-separated and `.` for the root itself; `dir`
-/// as given when it is not under `root`. A relative `dir` is taken from the
+/// as given when it is not under `root`. Relative paths are taken from the
 /// current directory.
 fn repo_path(dir: &Path, root: &Path) -> String {
-    let absolute = std::env::current_dir()
-        .map(|cwd| cwd.join(dir))
-        .unwrap_or_else(|_| dir.to_path_buf());
-    match absolute.strip_prefix(root) {
+    let absolute = |path: &Path| {
+        std::env::current_dir()
+            .map(|cwd| cwd.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    match absolute(dir).strip_prefix(absolute(root)) {
         Ok(rel) => match normalize(&rel.to_string_lossy()) {
             rel if rel.is_empty() => ".".to_string(),
             rel => rel,
@@ -284,5 +292,26 @@ mod tests {
             err.contains("is the path of web and the .meta name of frontend"),
             "{err}"
         );
+    }
+
+    #[test]
+    fn a_name_shared_by_two_repos_is_ambiguous_and_relative_roots_work() {
+        let root = std::path::PathBuf::from("ws-relative");
+        let dirs: Vec<String> = ["a/api", "b/api"]
+            .iter()
+            .map(|rel| root.join(rel).display().to_string())
+            .collect();
+        let names = repo_names(
+            &root,
+            &[project("api", "a/api"), project("api", "b/api")],
+            &[],
+        );
+        let err = select(&strings(&["api"]), &[], &dirs, &root, &names)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("is the .meta name of a/api, b/api"), "{err}");
+        // Paths still pick one, with a relative root as with an absolute one
+        let chosen = select(&strings(&["b/api"]), &[], &dirs, &root, &names).unwrap();
+        assert_eq!(chosen, [dirs[1].clone()]);
     }
 }
