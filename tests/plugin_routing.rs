@@ -36,7 +36,16 @@ esac
 }
 
 fn meta(root: &Path, args: &[&str]) {
-    let output = std::process::Command::new(env!("CARGO_BIN_EXE_meta"))
+    let output = run_meta(root, args);
+    assert!(
+        output.status.success(),
+        "meta {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn run_meta(root: &Path, args: &[&str]) -> std::process::Output {
+    std::process::Command::new(env!("CARGO_BIN_EXE_meta"))
         .args(args)
         .current_dir(root)
         .env("HOME", root)
@@ -50,12 +59,7 @@ fn meta(root: &Path, args: &[&str]) {
             .unwrap(),
         )
         .output()
-        .unwrap();
-    assert!(
-        output.status.success(),
-        "meta {args:?} failed: {}",
-        String::from_utf8_lossy(&output.stderr)
-    );
+        .unwrap()
 }
 
 #[test]
@@ -90,4 +94,34 @@ fn plugin_subcommand_still_routes_to_the_plugin() {
         !root.join("ran").exists(),
         "meta ran the plugin's command raw"
     );
+}
+
+#[test]
+fn a_plan_meta_cannot_read_fails_and_names_the_plugin() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    workspace(&root);
+    // An older plugin that still plans `cmd` strings instead of `argv`
+    let plugin = root.join("bin").join("meta-oldplan");
+    fs::write(
+        &plugin,
+        r#"#!/bin/sh
+case "$1" in
+  --meta-plugin-info) echo '{"name":"oldplan","version":"1.0.0","commands":["oldplan"]}' ;;
+  --meta-plugin-exec) cat >/dev/null; echo '{"plan":{"commands":[{"dir":".","cmd":"touch ran"}]}}' ;;
+esac
+"#,
+    )
+    .unwrap();
+    fs::set_permissions(&plugin, fs::Permissions::from_mode(0o755)).unwrap();
+
+    let output = run_meta(&root, &["oldplan", "run"]);
+
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        !output.status.success(),
+        "an unreadable plan passed as success"
+    );
+    assert!(stderr.contains("upgrade the plugin"), "{stderr}");
+    assert!(stderr.contains(&plugin.display().to_string()), "{stderr}");
 }

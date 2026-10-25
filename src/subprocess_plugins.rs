@@ -288,14 +288,22 @@ impl SubprocessPluginManager {
             return Ok(true);
         }
 
-        // Parse the plugin response
+        // A plan meta cannot read must not pass for success: an older plugin
+        // still sends `cmd` strings, and printing them would run nothing
+        let is_plan = serde_json::from_str::<serde_json::Value>(&stdout_str)
+            .is_ok_and(|value| value.get("plan").is_some());
         match serde_json::from_str::<PluginResponse>(&stdout_str) {
             Ok(response) => {
                 // Plugin returned an execution plan - execute it via loop_lib
                 self.execute_plan(&response.plan, root_dir, options)
             }
+            Err(e) if is_plan => anyhow::bail!(
+                "plugin {} sent an execution plan this meta cannot read ({e}); \
+                 upgrade the plugin to match this meta",
+                plugin.path.display()
+            ),
             Err(_) => {
-                // Couldn't parse as our protocol - print output as-is (legacy behavior)
+                // Not a plan - print output as-is
                 print!("{stdout_str}");
                 Ok(true)
             }

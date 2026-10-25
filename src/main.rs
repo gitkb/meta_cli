@@ -614,7 +614,7 @@ fn handle_command_dispatch(
     if command_args.is_empty() {
         if is_explicit_exec {
             // Show usage error (help is handled at the caller level via cli.help)
-            eprintln!("Usage: meta exec <command> [args...]");
+            eprintln!("Usage: meta exec -- <command> [args...]");
         } else {
             print_help_with_plugins(plugins, true);
         }
@@ -1349,7 +1349,7 @@ fn unrecognized_command_error(
     );
     eprintln!();
     eprintln!("To run '{command_str}' across all repos:");
-    eprintln!("    meta exec {command_str}");
+    eprintln!("    meta exec -- {command_str}");
     eprintln!();
     print_help_with_plugins(plugins, true);
     std::process::exit(1);
