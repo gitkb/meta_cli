@@ -213,8 +213,10 @@ impl RegistryConfig {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
         if std::fs::symlink_metadata(&config_path).is_ok() {
-            // It names where plugins are downloaded from
-            meta_core::store::check_private_file(&config_path)?;
+            // It names where plugins are downloaded from. (A symlink, as
+            // dotfile managers make, is fine if nothing on the way is
+            // another user's.)
+            meta_core::data_dir::check_trusted_file(&config_path)?;
             let content = std::fs::read_to_string(&config_path).with_context(|| {
                 format!(
                     "Failed to read {}",
