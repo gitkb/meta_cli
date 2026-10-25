@@ -46,6 +46,9 @@ impl SubprocessPluginManager {
     ///
     /// Discovery order (first match wins):
     /// 1. `.meta/plugins/` directories walking up from cwd (project-local)
+    ///
+    /// A plugin directory that another user owns or could write to is
+    /// skipped with a warning (see `meta_core::data_dir::check_private_dir`).
     /// 2. `~/.meta/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
@@ -74,7 +77,16 @@ impl SubprocessPluginManager {
             if plugin_dir.is_dir()
                 && visited.insert(plugin_dir.canonicalize().unwrap_or(plugin_dir.clone()))
             {
-                self.scan_directory(&plugin_dir)?;
+                // Plugins are run, so one that another user could have put
+                // there is skipped
+                match meta_core::data_dir::check_private_dir(&plugin_dir) {
+                    Ok(()) => self.scan_directory(&plugin_dir)?,
+                    Err(e) => eprintln!(
+                        "warning: skipping plugins in {}: {}",
+                        escape_path(&plugin_dir),
+                        escape_lines(&format!("{e:#}"))
+                    ),
+                }
             }
             if let Some(parent) = current_dir.parent() {
                 current_dir = parent.to_path_buf();
