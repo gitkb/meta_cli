@@ -80,7 +80,8 @@ pub fn select(
         };
         if by_name.len() > 1 {
             bail!(
-                "{flag} '{value}' is the .meta name of {}; name the repo by its path, as ./<path>",
+                "{flag} '{value}' is the .meta name of the repos at {}; name one by its path, \
+                 as ./<path>",
                 listed(&by_name)
             );
         }
@@ -88,8 +89,8 @@ pub fn select(
             |repos: &[&Repo]| -> Vec<PathBuf> { repos.iter().map(|r| r.id.clone()).collect() };
         if !by_path.is_empty() && !by_name.is_empty() && ids(&by_path) != ids(&by_name) {
             bail!(
-                "{flag} '{value}' is the path of {} and the .meta name of {}; name the repo by \
-                 its path, as ./<path>",
+                "{flag} '{value}' names the repo at {} by path and the repo at {} by .meta \
+                 name; name the one you mean by its path, as ./<path>",
                 listed(&by_path),
                 listed(&by_name)
             );
@@ -352,7 +353,7 @@ mod tests {
         // `web` is one repo's path and another's name
         let err = select("web").unwrap_err().to_string();
         assert!(
-            err.contains("is the path of web and the .meta name of frontend"),
+            err.contains("names the repo at web by path and the repo at frontend by .meta name"),
             "{err}"
         );
     }
@@ -371,7 +372,10 @@ mod tests {
         );
         let select = |value: &str| select(&strings(&[value]), &[], &dirs, &root, &names);
         let err = select("api").unwrap_err().to_string();
-        assert!(err.contains("is the .meta name of api, group/api"), "{err}");
+        assert!(
+            err.contains("is the .meta name of the repos at api, group/api"),
+            "{err}"
+        );
         // A ./ path picks one, with a relative root as with an absolute one
         assert_eq!(select("./api").unwrap(), [dirs[0].clone()]);
         assert_eq!(select("group/api").unwrap(), [dirs[1].clone()]);
