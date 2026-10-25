@@ -766,7 +766,7 @@ fn handle_command_dispatch(
                 if cli.verbose && !config_in_worktree {
                     eprintln!(
                         "Using config from primary checkout: {}",
-                        config_path.display()
+                        escape_path(&config_path)
                     );
                 }
 

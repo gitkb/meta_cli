@@ -32,30 +32,21 @@ fn cache_path() -> anyhow::Result<PathBuf> {
 }
 
 fn load_cache() -> Option<CachedContext> {
-    let path = cache_path().ok()?;
-    let content = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&content).ok()
+    // checked like any store: it is rendered into what agents read
+    meta_core::store::read::<Option<CachedContext>>(&cache_path().ok()?)
+        .ok()
+        .flatten()
 }
 
 fn save_cache(cached: &CachedContext, verbose: bool) {
     let Ok(path) = cache_path() else {
         return;
     };
-    match serde_json::to_vec(cached) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                if verbose {
-                    eprintln!("Failed to write context cache: {e}");
-                }
-            } else if verbose {
-                eprintln!("Saved context cache to {}", escape_path(&path));
-            }
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("Failed to serialize context cache: {e}");
-            }
-        }
+    match meta_core::store::write_atomic(&path, cached) {
+        Ok(()) if verbose => eprintln!("Saved context cache to {}", escape_path(&path)),
+        Ok(()) => {}
+        Err(e) if verbose => eprintln!("Failed to write context cache: {e:#}"),
+        Err(_) => {}
     }
 }
 
