@@ -6,6 +6,7 @@
 //! for worktree management commands.
 
 use anyhow::{Context, Result};
+use meta_core::display::{escape_lines, escape_path};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -132,7 +133,11 @@ fn discover_repos_recursive(
     let entries = match std::fs::read_dir(dir) {
         Ok(entries) => entries,
         Err(e) => {
-            log::debug!("Skipping unreadable directory {}: {e}", dir.display());
+            log::debug!(
+                "Skipping unreadable directory {}: {}",
+                escape_path(dir),
+                escape_lines(&format!("{e:#}"))
+            );
             return Ok(());
         }
     };
@@ -162,7 +167,11 @@ fn discover_repos_recursive(
             let source = match source_repo_from_gitfile(&sub_git) {
                 Ok(s) => s,
                 Err(e) => {
-                    log::debug!("Skipping {}: {e}", sub_path.display());
+                    log::debug!(
+                        "Skipping {}: {}",
+                        escape_path(&sub_path),
+                        escape_lines(&format!("{e:#}"))
+                    );
                     continue;
                 }
             };
@@ -179,7 +188,11 @@ fn discover_repos_recursive(
         } else {
             // Not a repo — recurse into intermediate directory
             if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
-                log::debug!("Skipping subtree {}: {e}", sub_path.display());
+                log::debug!(
+                    "Skipping subtree {}: {}",
+                    escape_path(&sub_path),
+                    escape_lines(&format!("{e:#}"))
+                );
             }
         }
     }
