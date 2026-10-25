@@ -144,21 +144,33 @@ fn distinct<'a>(repos: impl Iterator<Item = &'a Repo<'a>>) -> Vec<&'a Repo<'a>> 
     out
 }
 
-/// `dir`'s path from `root`, `/`-separated and `.` for the root itself; `dir`
-/// as given when it is not under `root`. Relative paths are taken from the
-/// current directory.
+/// `dir`'s path from `root`, `/`-separated and `.` for the root itself, with
+/// `..` parts for a directory outside `root` (`../shared`); `dir` as given
+/// when the two share no prefix (another drive). Relative paths are taken from
+/// the current directory.
 fn repo_path(dir: &Path, root: &Path) -> String {
     let absolute = |path: &Path| {
         std::env::current_dir()
             .map(|cwd| cwd.join(path))
             .unwrap_or_else(|_| path.to_path_buf())
     };
-    match absolute(dir).strip_prefix(absolute(root)) {
-        Ok(rel) => match normalize(&rel.to_string_lossy()) {
-            rel if rel.is_empty() => ".".to_string(),
-            rel => rel,
-        },
-        Err(_) => dir.display().to_string(),
+    let (dir_abs, root_abs) = (absolute(dir), absolute(root));
+    let shared = dir_abs
+        .components()
+        .zip(root_abs.components())
+        .take_while(|(a, b)| a == b)
+        .count();
+    if shared == 0 {
+        return dir.display().to_string();
+    }
+    let up = root_abs
+        .components()
+        .skip(shared)
+        .map(|_| Component::ParentDir);
+    let rel: PathBuf = up.chain(dir_abs.components().skip(shared)).collect();
+    match normalize(&rel.to_string_lossy()) {
+        rel if rel.is_empty() => ".".to_string(),
+        rel => rel,
     }
 }
 
@@ -334,6 +346,9 @@ mod tests {
         let select = |value: &str| select(&strings(&[value]), &[], &dirs, &root, &names);
         assert_eq!(select("core-lib").unwrap(), [dirs[0].clone()]);
         assert_eq!(select("far").unwrap(), [dirs[3].clone()]);
+        // A repo outside the root has a ../ path
+        assert_eq!(select("../../elsewhere").unwrap(), [dirs[3].clone()]);
+        assert_eq!(select("./../../elsewhere").unwrap(), [dirs[3].clone()]);
         // `web` is one repo's path and another's name
         let err = select("web").unwrap_err().to_string();
         assert!(
