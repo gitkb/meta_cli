@@ -278,10 +278,6 @@ fn key_commands() -> Vec<CommandRef> {
             description: "commit in all dirty repos".to_string(),
         },
         CommandRef {
-            command: "meta git snapshot create <name>".to_string(),
-            description: "save state before batch changes".to_string(),
-        },
-        CommandRef {
             command: "meta --include X,Y exec -- <cmd>".to_string(),
             description: "target specific repos".to_string(),
         },
