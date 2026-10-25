@@ -212,9 +212,15 @@ impl RegistryConfig {
     /// Load registry config from ~/.meta/config.yaml
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
-        if config_path.exists() {
-            let content = std::fs::read_to_string(&config_path)
-                .with_context(|| format!("Failed to read {}", config_path.display()))?;
+        if std::fs::symlink_metadata(&config_path).is_ok() {
+            // It names where plugins are downloaded from
+            meta_core::store::check_private_file(&config_path)?;
+            let content = std::fs::read_to_string(&config_path).with_context(|| {
+                format!(
+                    "Failed to read {}",
+                    meta_core::display::escape_path(&config_path)
+                )
+            })?;
             let config: RegistryConfig = serde_yaml::from_str(&content)
                 .with_context(|| "Failed to parse registry config")?;
             Ok(config)

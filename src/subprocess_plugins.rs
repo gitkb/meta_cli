@@ -141,7 +141,15 @@ impl SubprocessPluginManager {
                     && !name.ends_with(".so")
                     && !name.ends_with(".dll")
                 {
-                    self.try_load_plugin(&path)?;
+                    // It is run: skip it if another user could have changed it
+                    match meta_core::data_dir::check_trusted_file(&path) {
+                        Ok(()) => self.try_load_plugin(&path)?,
+                        Err(e) => eprintln!(
+                            "warning: skipping plugin {}: {}",
+                            escape_path(&path),
+                            escape_lines(&format!("{e:#}"))
+                        ),
+                    }
                 }
             }
         }
