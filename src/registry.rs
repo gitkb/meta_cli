@@ -118,8 +118,16 @@ pub enum InstallScope {
 impl PluginManifest {
     /// Load manifest from file, or return empty manifest if not found
     pub fn load(manifest_path: &Path) -> Result<Self> {
-        if !manifest_path.exists() {
-            return Ok(Self::default());
+        match std::fs::symlink_metadata(manifest_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!("Cannot read manifest {}", escape_path(manifest_path))
+                })
+            }
+            // It names where each plugin is updated from, so another user
+            // must not be able to change it
+            Ok(_) => meta_core::data_dir::check_trusted_file(manifest_path)?,
         }
 
         let content = std::fs::read_to_string(manifest_path).with_context(|| {
@@ -698,7 +706,18 @@ impl PluginInstaller {
                 "Failed to create plugins directory: {}",
                 escape_path(&self.plugins_dir)
             )
-        })
+        })?;
+        self.check_plugins_dir()
+    }
+
+    /// Plugins are run from this directory and its manifest says where they
+    /// are updated from: like plugin discovery, refuse it when another user
+    /// owns it or can change it (or a directory on the way to it).
+    fn check_plugins_dir(&self) -> Result<()> {
+        match std::fs::symlink_metadata(&self.plugins_dir) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            _ => meta_core::data_dir::check_private_dir(&self.plugins_dir),
+        }
     }
 
     /// Get the manifest file path
@@ -708,6 +727,7 @@ impl PluginInstaller {
 
     /// Load the plugin manifest
     fn load_manifest(&self) -> Result<PluginManifest> {
+        self.check_plugins_dir()?;
         PluginManifest::load(&self.manifest_path())
     }
 
@@ -1087,6 +1107,8 @@ impl PluginInstaller {
     fn validate_plugin(&self, plugin_path: &Path) -> Result<()> {
         use std::process::Command;
 
+        // It is run: the same check as for any plugin meta runs
+        meta_core::data_dir::check_trusted_file(plugin_path)?;
         let output = Command::new(plugin_path)
             .arg("--meta-plugin-info")
             .output()
