@@ -668,7 +668,7 @@ impl PluginInstaller {
             }
 
             // Check for legacy config files in current directory
-            if let Some((_config_path, _)) = find_meta_config_in(current) {
+            if let Some((_config_path, _)) = find_meta_config_in(current)? {
                 return Ok(current.to_path_buf());
             }
 

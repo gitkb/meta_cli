@@ -179,7 +179,7 @@ fn install_claude_integration_to(
     let skills_dir = claude_dir.join("skills");
     let rules_dir = claude_dir.join("rules");
 
-    if config::find_meta_config_in(target_dir).is_none() {
+    if !matches!(config::find_meta_config_in(target_dir), Ok(Some(_))) {
         println!(
             "{}",
             "Warning: No .meta config found in current directory.".yellow()
