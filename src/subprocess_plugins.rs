@@ -168,7 +168,16 @@ impl SubprocessPluginManager {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("meta-") && is_executable(&path) {
-                        self.try_load_plugin(&path)?;
+                        // It is run: a link into a dir another user can change
+                        // (a refused plugin dir, say) is skipped like one there
+                        match meta_core::data_dir::check_trusted_file(&path) {
+                            Ok(()) => self.try_load_plugin(&path)?,
+                            Err(e) => eprintln!(
+                                "warning: skipping plugin {}: {}",
+                                escape_path(&path),
+                                escape_lines(&format!("{e:#}"))
+                            ),
+                        }
                     }
                 }
             }
