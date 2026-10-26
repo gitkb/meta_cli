@@ -129,7 +129,9 @@ fn nested_meta_dir_reads_its_workspace_plugins_but_not_an_unlisting_parent() {
         String::from_utf8_lossy(&output.stdout).contains("parent")
     };
     // The parent lists this meta dir: one workspace, its plugins load here
-    assert!(listed("projects:\n  workspace:\n    repo: x\n    meta: true\n"));
+    assert!(listed(
+        "projects:\n  workspace:\n    repo: x\n    meta: true\n"
+    ));
     // A parent that doesn't list it is another workspace
     assert!(!listed("projects: {}\n"));
 }
