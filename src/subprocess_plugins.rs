@@ -56,7 +56,7 @@ impl SubprocessPluginManager {
         let mut current_dir = std::env::current_dir()?;
         loop {
             let plugin_dir = current_dir.join(".meta").join("plugins");
-            if plugin_dir.is_dir() && visited.insert(plugin_dir.clone()) {
+            if plugin_dir.is_dir() && visited.insert(resolved(&plugin_dir)) {
                 self.scan_directory(&plugin_dir)?;
             }
             if let Some(parent) = current_dir.parent() {
@@ -70,7 +70,7 @@ impl SubprocessPluginManager {
         // no global plugins.
         if let Ok(meta_dir) = meta_core::meta_dir() {
             let global_plugins = meta_dir.join("plugins");
-            if global_plugins.is_dir() && visited.insert(global_plugins.clone()) {
+            if global_plugins.is_dir() && visited.insert(resolved(&global_plugins)) {
                 self.scan_directory(&global_plugins)?;
             }
         }
@@ -78,7 +78,7 @@ impl SubprocessPluginManager {
         // Search in PATH for meta-* executables (bundled/system)
         if let Ok(path_var) = std::env::var("PATH") {
             for path_dir in std::env::split_paths(&path_var) {
-                if path_dir.exists() && visited.insert(path_dir.clone()) {
+                if path_dir.exists() && visited.insert(resolved(&path_dir)) {
                     self.scan_path_directory(&path_dir)?;
                 }
             }
@@ -646,6 +646,12 @@ impl SubprocessPluginManager {
 
         help
     }
+}
+
+/// `dir` with its links resolved, so one directory reached by two paths
+/// (`/bin` linked to `/usr/bin`) is scanned once.
+fn resolved(dir: &Path) -> PathBuf {
+    dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf())
 }
 
 /// Check if a file is executable
