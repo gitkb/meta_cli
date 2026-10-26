@@ -145,14 +145,10 @@ impl PluginManifest {
 
     /// Save manifest to file
     pub fn save(&self, manifest_path: &Path) -> Result<()> {
-        let json =
-            serde_json::to_string_pretty(self).with_context(|| "Failed to serialize manifest")?;
-
-        std::fs::write(manifest_path, json).with_context(|| {
-            format!("Failed to write manifest to {}", escape_path(manifest_path))
-        })?;
-
-        Ok(())
+        // Private (0600), like meta's other stores: load refuses a manifest
+        // others could change, so one written under umask 002 would refuse itself
+        meta_core::store::write_atomic(manifest_path, self)
+            .with_context(|| format!("Failed to write manifest to {}", escape_path(manifest_path)))
     }
 
     /// Add or update a plugin entry
@@ -701,13 +697,8 @@ impl PluginInstaller {
 
     /// Ensure the plugins directory exists
     fn ensure_plugins_dir(&self) -> Result<()> {
-        std::fs::create_dir_all(&self.plugins_dir).with_context(|| {
-            format!(
-                "Failed to create plugins directory: {}",
-                escape_path(&self.plugins_dir)
-            )
-        })?;
-        self.check_plugins_dir()
+        // Made 0700 (whatever the umask), then held to the private-dir rules
+        meta_core::data_dir::create_private_dir(&self.plugins_dir)
     }
 
     /// Plugins are run from this directory and its manifest says where they
@@ -1175,6 +1166,8 @@ impl PluginInstaller {
     pub fn uninstall(&self, name: &str) -> Result<()> {
         let plugin_name = ensure_plugin_prefix(name);
 
+        // Refuse an untrusted dir before deleting anything in it
+        self.check_plugins_dir()?;
         let plugin_path = self.plugins_dir.join(&plugin_name);
         if plugin_path.exists() {
             std::fs::remove_file(&plugin_path)
@@ -1359,6 +1352,25 @@ mod tests {
         assert_eq!(registries.len(), 2);
         assert_eq!(registries[0], "https://custom.registry.com");
         assert_eq!(registries[1], "https://another.registry.com");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_plugins_dir_and_manifest_are_private_whatever_the_umask() {
+        // Load refuses a manifest or dir others could change, so meta must
+        // not create them group- or world-writable (umask 002) itself
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let installer = PluginInstaller {
+            plugins_dir: dir.path().join("plugins"),
+            verbose: false,
+            scope: InstallScope::Local,
+        };
+        installer.save_manifest(&PluginManifest::default()).unwrap();
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode(&installer.plugins_dir), 0o700);
+        assert_eq!(mode(&installer.manifest_path()), 0o600);
+        assert!(installer.load_manifest().is_ok());
     }
 
     #[test]

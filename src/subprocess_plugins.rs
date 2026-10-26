@@ -115,7 +115,11 @@ impl SubprocessPluginManager {
         // Search in PATH for meta-* executables (bundled/system)
         if let Ok(path_var) = std::env::var("PATH") {
             for path_dir in std::env::split_paths(&path_var) {
-                if path_dir.exists() && visited.insert(path_dir.clone()) {
+                // Compared resolved, like the plugin dirs above: a PATH entry
+                // that links to a refused plugin dir must not bring it back
+                if path_dir.exists()
+                    && visited.insert(path_dir.canonicalize().unwrap_or(path_dir.clone()))
+                {
                     self.scan_path_directory(&path_dir)?;
                 }
             }
