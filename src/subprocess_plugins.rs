@@ -6,14 +6,98 @@
 use anyhow::{Context, Result};
 use meta_core::display::{escape, escape_path};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
 pub use meta_plugin_protocol::{
     ExecutionPlan, PlanResponse as PluginResponse, PlannedCommand, PluginHelp, PluginInfo,
     PluginRequest, PluginRequestOptions,
 };
+
+/// Query metadata with one deadline for both process exit and stdout EOF.
+pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut command = Command::new(path);
+    command
+        .arg("--meta-plugin-info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    let Some(mut stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(None);
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    let reader = std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
+        let _ = sender.send(result);
+    });
+    let mut status = None;
+    let mut output = None;
+    loop {
+        if status.is_none() {
+            status = match child.try_wait() {
+                Ok(status) => status,
+                Err(_) => break,
+            };
+        }
+        if output.is_none() {
+            match receiver.try_recv() {
+                Ok(result) => output = Some(result),
+                Err(std::sync::mpsc::TryRecvError::Empty) => {}
+                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+            }
+        }
+        if let (Some(status), Some(output)) = (status.as_ref(), output.as_ref()) {
+            let _ = reader.join();
+            return Ok(if status.success() {
+                output
+                    .as_ref()
+                    .ok()
+                    .and_then(|bytes| serde_json::from_slice(bytes).ok())
+            } else {
+                None
+            });
+        }
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            break;
+        }
+        std::thread::sleep(remaining.min(Duration::from_millis(10)));
+    }
+    // A wrapper may already have exited while its descendants hold stdout open.
+    // Kill its process group even when try_wait has reaped the wrapper.
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: the child was started as leader of its own process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    let _ = child.kill();
+    let _ = child.wait();
+    if reader.is_finished() {
+        let _ = reader.join();
+    }
+    anyhow::bail!(
+        "Plugin {} did not answer --meta-plugin-info within 5 seconds; skipping",
+        escape_path(path)
+    )
+}
 
 /// A discovered subprocess plugin
 #[derive(Debug, Clone)]
@@ -45,24 +129,19 @@ impl SubprocessPluginManager {
     /// Discover and load all subprocess plugins
     ///
     /// Discovery order (first match wins):
-    /// 1. `.meta/plugins/` directories walking up from cwd (project-local)
-    /// 2. `~/.meta/plugins/` (global installed)
+    /// 1. The nearest workspace's `.meta/plugins/` (project-local)
+    /// 2. `meta_core::meta_dir()/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
-        // Search in .meta/plugins/ directories walking up from cwd (project-local)
-        let mut current_dir = std::env::current_dir()?;
-        loop {
-            let plugin_dir = current_dir.join(".meta").join("plugins");
-            if plugin_dir.is_dir() && visited.insert(resolved(&plugin_dir)) {
+        // Local plugins belong only to the nearest workspace, independently of --config.
+        let cwd = std::env::current_dir()?;
+        if let Some(root) = meta_core::config::find_workspace_root(&cwd)? {
+            let plugin_dir = root.join(".meta/plugins");
+            if visited.insert(resolved(&plugin_dir)) {
                 self.scan_directory(&plugin_dir)?;
-            }
-            if let Some(parent) = current_dir.parent() {
-                current_dir = parent.to_path_buf();
-            } else {
-                break;
             }
         }
 
@@ -70,7 +149,7 @@ impl SubprocessPluginManager {
         // no global plugins.
         if let Ok(meta_dir) = meta_core::meta_dir() {
             let global_plugins = meta_dir.join("plugins");
-            if global_plugins.is_dir() && visited.insert(resolved(&global_plugins)) {
+            if visited.insert(resolved(&global_plugins)) {
                 self.scan_directory(&global_plugins)?;
             }
         }
@@ -87,14 +166,36 @@ impl SubprocessPluginManager {
         Ok(())
     }
 
-    /// Scan a .meta-plugins directory for plugin executables
+    /// Scan a `.meta/plugins` directory for plugin executables
     fn scan_directory(&mut self, dir: &Path) -> Result<()> {
         if self.verbose {
             println!("Scanning for subprocess plugins in: {}", escape_path(dir));
         }
 
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            Err(e) => {
+                eprintln!(
+                    "Warning: Cannot read plugins directory {}: {}; skipping",
+                    escape_path(dir),
+                    escape(&e.to_string())
+                );
+                return Ok(());
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Cannot read plugins directory {}: {}; skipping entry",
+                        escape_path(dir),
+                        escape(&e.to_string())
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
 
             // Look for executables named meta-*
@@ -133,46 +234,29 @@ impl SubprocessPluginManager {
             return Ok(());
         }
 
-        // Query plugin info
-        let output = Command::new(path)
-            .arg("--meta-plugin-info")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output();
-
-        match output {
-            Ok(output) if output.status.success() => {
-                // Try to parse as plugin info - silently skip if invalid JSON
-                // (e.g., meta-mcp is an MCP server, not a meta plugin)
-                let info: PluginInfo = match serde_json::from_slice(&output.stdout) {
-                    Ok(info) => info,
-                    Err(_) => return Ok(()), // Not a valid plugin, skip silently
-                };
-
-                if self.verbose {
-                    println!(
-                        "  Found plugin: {} v{} ({})",
-                        escape(&info.name),
-                        escape(&info.version),
-                        escape_path(path)
-                    );
-                }
-
-                // Don't override if already loaded (first one wins)
-                if !self.plugins.contains_key(&info.name) {
-                    self.plugins.insert(
-                        info.name.clone(),
-                        SubprocessPlugin {
-                            path: path.to_path_buf(),
-                            info,
-                        },
-                    );
-                }
+        let info = match probe_plugin_info(path) {
+            Ok(Some(info)) => info,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                eprintln!("Warning: {e}");
+                return Ok(());
             }
-            _ => {
-                // Not a valid plugin, ignore silently
-            }
+        };
+        if self.verbose {
+            println!(
+                "  Found plugin: {} v{} ({})",
+                escape(&info.name),
+                escape(&info.version),
+                escape_path(path)
+            );
         }
+        // Don't override if already loaded (first one wins).
+        self.plugins
+            .entry(info.name.clone())
+            .or_insert_with(|| SubprocessPlugin {
+                path: path.to_path_buf(),
+                info,
+            });
         Ok(())
     }
 

@@ -755,7 +755,8 @@ fn handle_command_dispatch(
             }
 
             // Try to find .meta config for full feature support
-            if let Some((config_path, _format)) = find_meta_config(&task_dir, cli.config.as_ref()) {
+            if let Some((config_path, _format)) = find_meta_config(&task_dir, cli.config.as_ref())?
+            {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
                 // Build name→info lookup for tag filtering
@@ -889,14 +890,14 @@ fn handle_command_dispatch(
         }
     }
 
-    let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref()) {
+    let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref())? {
         Some((path, _format)) => path,
         None => {
             let config_name = cli
                 .config
                 .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".meta / .meta.yaml / .meta.yml".to_string());
+                .map(|p| escape_path(p))
+                .unwrap_or_else(|| config::META_CONFIG_NAMES.join(" / "));
             eprintln!("Error: Could not find meta config file '{config_name}'");
             eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
@@ -1158,17 +1159,15 @@ fn handle_plugin_command(
                 return Ok(());
             }
             if local {
-                // For --local, use the registry-based listing for plugin management
-                let plugins = match PluginInstaller::new_local(verbose) {
-                    Ok(installer) => installer.list_plugins_detailed()?,
-                    Err(_) => {
-                        if !json {
-                            println!("Not in a meta workspace");
-                        }
-                        return Ok(());
+                let cwd = std::env::current_dir()?;
+                if config::find_workspace_root(&cwd)?.is_none() {
+                    if !json {
+                        println!("Not in a meta workspace");
                     }
-                };
-
+                    return Ok(());
+                }
+                let installer = PluginInstaller::new_local(verbose)?;
+                let plugins = installer.list_plugins_detailed()?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&plugins)?);
                 } else if plugins.is_empty() {
@@ -1184,9 +1183,7 @@ fn handle_plugin_command(
                             .strip_prefix(PLUGIN_PREFIX)
                             .unwrap_or(&plugin.name);
                         let version = plugin.version.as_deref().unwrap_or("-");
-                        // For local plugins, show the path in the local plugins dir
-                        let cwd = std::env::current_dir()?;
-                        let path = cwd.join(".meta/plugins").join(&plugin.name);
+                        let path = installer.plugins_dir().join(&plugin.name);
                         println!(
                             "{:<12} {:<12} {}",
                             escape(name),
@@ -1463,7 +1460,7 @@ fn check_and_warn_orphan() {
     }
 
     // Find the nearest .meta config
-    let Some((config_path, _)) = find_meta_config(&current_dir, None) else {
+    let Ok(Some((config_path, _))) = find_meta_config(&current_dir, None) else {
         return;
     };
 
@@ -1483,14 +1480,9 @@ fn check_and_warn_orphan() {
         eprintln!();
 
         // Show format-appropriate syntax
-        let config_file = match warning.parent_format {
-            ConfigFormat::Json => ".meta",
-            ConfigFormat::Yaml => ".meta.yaml",
-        };
         eprintln!(
-            "  To include it, add to {}/{}:",
-            escape_path(&warning.parent),
-            config_file
+            "  To include it, add to {}:",
+            escape_path(&warning.parent_config)
         );
         match warning.parent_format {
             ConfigFormat::Json => {
@@ -1680,23 +1672,21 @@ ignore:
         let meta_path = dir.path().join(".meta");
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
         let (path, _format) = result.unwrap();
         assert_eq!(path, meta_path);
     }
 
     #[test]
-    fn test_find_meta_config_yaml_priority() {
+    fn test_find_meta_config_rejects_ambiguity() {
         let dir = tempfile::tempdir().unwrap();
-        // Create .meta first (JSON), then .meta.yaml
         std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
-
-        // .meta should be found first (it's checked before .meta.yaml)
-        let result = find_meta_config(dir.path(), None);
-        assert!(result.is_some());
-        let (path, _format) = result.unwrap();
-        assert!(path.ends_with(".meta"));
+        std::fs::write(dir.path().join(".meta.yaml"), "projects: {}").unwrap();
+        let err = find_meta_config(dir.path(), None).unwrap_err().to_string();
+        assert!(err.contains("Multiple meta config files"));
+        assert!(err.contains(".meta.yaml"));
+        assert!(err.contains(&escape_path(&dir.path().join(".meta"))));
     }
 
     #[test]
@@ -1939,7 +1929,7 @@ projects:
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
         // Search from nested directory should find root .meta
-        let result = find_meta_config(&nested, None);
+        let result = find_meta_config(&nested, None).unwrap();
         assert!(result.is_some());
         let (found_path, _) = result.unwrap();
         assert_eq!(found_path, meta_path);
@@ -1953,7 +1943,7 @@ projects:
         let yaml_path = dir.path().join(".meta.yaml");
         std::fs::write(&yaml_path, "projects:\n  p1: git@test.git\n").unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
 
         // Clean up and test .yml extension
@@ -1961,7 +1951,7 @@ projects:
         let yml_path = dir.path().join(".meta.yml");
         std::fs::write(&yml_path, "projects:\n  p2: git@test.git\n").unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
     }
 }

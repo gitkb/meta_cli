@@ -1,0 +1,405 @@
+//! Plugin scope and metadata probing must not break unrelated commands.
+#![cfg(unix)]
+
+use std::fs;
+use std::os::unix::fs::PermissionsExt;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+struct Fixture {
+    _temp: tempfile::TempDir,
+    home: PathBuf,
+    cwd: PathBuf,
+    data: PathBuf,
+    bin: PathBuf,
+}
+
+impl Fixture {
+    fn new(workspace: bool) -> Self {
+        let temp = tempfile::tempdir().unwrap();
+        let home = temp.path().join("home");
+        let cwd = home.join("workspace");
+        let data = temp.path().join("data");
+        let bin = temp.path().join("bin");
+        for dir in [&cwd, &data, &bin] {
+            fs::create_dir_all(dir).unwrap();
+        }
+        if workspace {
+            fs::write(cwd.join(".meta.yaml"), "projects: {}\n").unwrap();
+        }
+        Self {
+            _temp: temp,
+            home,
+            cwd,
+            data,
+            bin,
+        }
+    }
+
+    fn command(&self, args: &[&str]) -> Command {
+        let mut cmd = Command::new(env!("CARGO_BIN_EXE_meta"));
+        cmd.args(args)
+            .current_dir(&self.cwd)
+            .env("HOME", &self.home)
+            .env("XDG_CONFIG_HOME", self.home.join("xdg"))
+            .env("XDG_DATA_HOME", self.home.join("xdg/data"))
+            .env("GIT_CONFIG_GLOBAL", self.home.join("gitconfig"))
+            .env("META_DATA_DIR", &self.data)
+            .env("PATH", format!("{}:/usr/bin:/bin", self.bin.display()));
+        cmd
+    }
+
+    fn run(&self, args: &[&str]) -> Output {
+        self.command(args).output().unwrap()
+    }
+}
+
+fn script(path: &Path, body: &str) {
+    fs::create_dir_all(path.parent().unwrap()).unwrap();
+    fs::write(path, format!("#!/bin/sh\n{body}\n")).unwrap();
+    fs::set_permissions(path, fs::Permissions::from_mode(0o755)).unwrap();
+}
+
+fn plugin(path: &Path, name: &str, version: &str) {
+    script(
+        path,
+        &format!(
+            "echo '{{\"name\":\"{name}\",\"version\":\"{version}\",\"commands\":[\"{name}\"]}}'"
+        ),
+    );
+}
+
+#[test]
+fn bare_home_meta_directory_is_neither_workspace_nor_project_plugin_source() {
+    let f = Fixture::new(false);
+    plugin(&f.home.join(".meta/plugins/meta-fake"), "fake", "1.0");
+    let help = f.run(&["--help"]);
+    assert!(help.status.success());
+    assert!(!String::from_utf8_lossy(&help.stdout).contains("fake"));
+    for args in [
+        vec!["plugin", "list", "--local"],
+        vec!["plugin", "install", "--local", "missing/repo"],
+        vec!["plugin", "uninstall", "--local", "missing"],
+        vec!["plugin", "update", "--local", "missing"],
+    ] {
+        let output = f.run(&args);
+        let text = format!(
+            "{}{}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+        assert!(text.contains("Not in a meta workspace"), "{args:?}: {text}");
+    }
+}
+
+#[test]
+fn discovery_stops_at_nearest_workspace_and_uses_global_data_dir() {
+    let f = Fixture::new(true);
+    plugin(&f.home.join(".meta/plugins/meta-ancestor"), "ancestor", "1");
+    plugin(&f.cwd.join(".meta/plugins/meta-local"), "local", "2");
+    plugin(&f.data.join("plugins/meta-global"), "global", "3");
+    plugin(&f.bin.join("meta-system"), "system", "4");
+    // All three sources provide the same name: the local one wins.
+    plugin(&f.data.join("plugins/meta-local"), "local", "wrong-global");
+    plugin(&f.bin.join("meta-local"), "local", "wrong-path");
+    plugin(&f.bin.join("meta-global"), "global", "wrong-path");
+    let output = f.run(&["plugin", "list", "--json"]);
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(!text.contains("ancestor"), "{text}");
+    assert!(!text.contains("wrong-"), "{text}");
+    for name in ["local", "global", "system"] {
+        assert!(text.contains(name), "{text}");
+    }
+}
+
+#[test]
+fn explicit_config_does_not_redirect_plugin_scope() {
+    let f = Fixture::new(true);
+    let other = f.home.join("other");
+    fs::create_dir(&other).unwrap();
+    fs::write(other.join(".meta.yaml"), "projects: {}").unwrap();
+    plugin(&other.join(".meta/plugins/meta-foreign"), "foreign", "1");
+    plugin(&f.cwd.join(".meta/plugins/meta-local"), "local", "2");
+    let output = f.run(&[
+        "--config",
+        other.join(".meta.yaml").to_str().unwrap(),
+        "plugin",
+        "list",
+        "--json",
+    ]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains("local"));
+    assert!(!text.contains("foreign"));
+}
+
+#[test]
+fn local_list_from_subdirectory_uses_real_path_and_binary_version() {
+    let mut f = Fixture::new(true);
+    let plugin_path = f.cwd.join(".meta/plugins/meta-real");
+    plugin(&plugin_path, "real", "2.5.0");
+    fs::write(f.cwd.join(".meta/plugins/.manifest.json"), r#"{"plugins":{"meta-real":{"source":"example/repo","version":"stale","installed":"2024-01-01","platform":"test"}}}"#).unwrap();
+    f.cwd = f.cwd.join("nested/deep");
+    fs::create_dir_all(&f.cwd).unwrap();
+    let output = f.run(&["plugin", "list", "--local"]);
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(text.contains(plugin_path.to_str().unwrap()), "{text}");
+    assert!(text.contains("2.5.0"), "{text}");
+    assert!(!text.contains("stale"), "{text}");
+}
+
+#[test]
+fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
+    let f = Fixture::new(true);
+    fs::write(f.cwd.join(".meta.json"), "{}").unwrap();
+    for args in [vec!["--help"], vec!["plugin", "list", "--local"]] {
+        let output = f.run(&args);
+        assert!(!output.status.success());
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(err.contains("Multiple meta config files"), "{err}");
+        assert!(
+            err.contains(".meta.json") && err.contains(".meta.yaml"),
+            "{err}"
+        );
+    }
+    fs::remove_file(f.cwd.join(".meta.json")).unwrap();
+    let output = f.run(&["--config", "absent\u{1b}\nFORGED", "exec", "--", "true"]);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("Could not find meta config file 'absent\\u{1b}\\nFORGED'"),
+        "{err}"
+    );
+    assert!(!err.contains('\u{1b}'), "{err}");
+    fs::remove_file(f.cwd.join(".meta.yaml")).unwrap();
+    let output = f.run(&["exec", "--", "true"]);
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        err.contains("'.meta / .meta.json / .meta.yaml / .meta.yml'"),
+        "{err}"
+    );
+}
+
+#[test]
+fn local_install_gitignores_untracked_plugin_files() {
+    use std::io::{Read, Write};
+    use std::net::TcpListener;
+    let f = Fixture::new(true);
+    let body =
+        b"#!/bin/sh\necho '{\"name\":\"installed\",\"version\":\"1.2.3\",\"commands\":[]}'\n";
+    let mut archive = tar::Builder::new(flate2::write::GzEncoder::new(
+        Vec::new(),
+        flate2::Compression::default(),
+    ));
+    let mut header = tar::Header::new_gnu();
+    header.set_path("meta-installed").unwrap();
+    header.set_size(body.len() as u64);
+    header.set_mode(0o755);
+    header.set_cksum();
+    archive.append(&header, body.as_slice()).unwrap();
+    let bytes = archive.into_inner().unwrap().finish().unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let url = format!("http://{}/plugin.tar.gz", listener.local_addr().unwrap());
+    listener.set_nonblocking(true).unwrap();
+    let server = std::thread::spawn(move || {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        loop {
+            match listener.accept() {
+                Ok((mut stream, _)) => {
+                    stream
+                        .set_read_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    stream
+                        .set_write_timeout(Some(Duration::from_secs(2)))
+                        .unwrap();
+                    let mut request = [0; 4096];
+                    assert!(stream.read(&mut request).unwrap() > 0);
+                    write!(
+                        stream,
+                        "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+                        bytes.len()
+                    )
+                    .unwrap();
+                    stream.write_all(&bytes).unwrap();
+                    return;
+                }
+                Err(e)
+                    if e.kind() == std::io::ErrorKind::WouldBlock && Instant::now() < deadline =>
+                {
+                    std::thread::sleep(Duration::from_millis(10));
+                }
+                Err(e) => panic!("download request did not arrive: {e}"),
+            }
+        }
+    });
+    let output = f.run(&["plugin", "install", "--local", &url]);
+    server.join().unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    assert!(f.cwd.join(".meta/plugins/meta-installed").is_file());
+    assert_eq!(
+        fs::read_to_string(f.cwd.join(".meta/plugins/.gitignore")).unwrap(),
+        "*\n"
+    );
+}
+
+#[test]
+fn orphan_hint_names_actual_parent_config() {
+    for name in [".meta.json", ".meta.yml"] {
+        let f = Fixture::new(true);
+        let parent_config = f.home.join(name);
+        fs::write(
+            &parent_config,
+            if name.ends_with("json") {
+                "{\"projects\":{}}"
+            } else {
+                "projects: {}"
+            },
+        )
+        .unwrap();
+        let output = f.run(&["--help"]);
+        assert!(output.status.success());
+        let err = String::from_utf8_lossy(&output.stderr);
+        assert!(
+            err.contains(&format!(
+                "To include it, add to {}:",
+                parent_config.display()
+            )),
+            "{err}"
+        );
+    }
+}
+
+#[test]
+fn unreadable_plugin_directory_warns_and_help_still_runs() {
+    // Root can read mode-000 directories, so this case cannot be exercised there.
+    if unsafe { libc::geteuid() } == 0 {
+        return;
+    }
+    let f = Fixture::new(true);
+    let global_data = f.home.join("global\nFORGED\u{1b}");
+    let global_plugins = global_data.join("plugins");
+    fs::create_dir_all(&global_plugins).unwrap();
+    fs::set_permissions(&global_plugins, fs::Permissions::from_mode(0o000)).unwrap();
+    let output = f
+        .command(&["--help"])
+        .env("META_DATA_DIR", &global_data)
+        .output()
+        .unwrap();
+    fs::set_permissions(&global_plugins, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    assert!(err.contains("global\\nFORGED\\u{1b}/plugins"), "{err}");
+    assert!(err.contains("Cannot read plugins directory"), "{err}");
+    assert!(!err.contains('\u{1b}'));
+    // Also exercise the actual workspace plugins directory.
+    let path = f.cwd.join(".meta/plugins");
+    fs::create_dir_all(&path).unwrap();
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o000)).unwrap();
+    let output_local = f.run(&["--help"]);
+    fs::set_permissions(&path, fs::Permissions::from_mode(0o700)).unwrap();
+    assert!(output.status.success());
+    assert!(output_local.status.success());
+    let err = String::from_utf8_lossy(&output_local.stderr);
+    assert!(
+        err.contains("Warning: Cannot read plugins directory"),
+        "{err}"
+    );
+    assert!(err.contains(path.to_str().unwrap()), "{err}");
+}
+
+fn running(pid: i32) -> bool {
+    // On Linux an orphan may briefly be a zombie until init reaps it.
+    if let Ok(stat) = fs::read_to_string(format!("/proc/{pid}/stat")) {
+        return !stat.rsplit_once(") ").unwrap().1.starts_with('Z');
+    }
+    unsafe { libc::kill(pid, 0) == 0 }
+}
+
+fn timeout_case(background: bool) {
+    let f = Fixture::new(true);
+    let pidfile = f.cwd.join("pids");
+    let path = f.cwd.join(".meta/plugins/meta-hung\nFORGED\u{1b}");
+    let body = if background {
+        "echo $$ > pids\nsleep 60 &\necho $! >> pids\nexit 0"
+    } else {
+        "echo $$ > pids\nexec sleep 60"
+    };
+    script(&path, body);
+    // Redirect to files so a regression cannot block this test on inherited pipes.
+    let stdout = fs::File::create(f.cwd.join("stdout")).unwrap();
+    let stderr = fs::File::create(f.cwd.join("stderr")).unwrap();
+    let started = Instant::now();
+    let mut child = f
+        .command(&["--help"])
+        .stdout(Stdio::from(stdout))
+        .stderr(Stdio::from(stderr))
+        .spawn()
+        .unwrap();
+    let status = loop {
+        if let Some(status) = child.try_wait().unwrap() {
+            break Some(status);
+        }
+        if started.elapsed() > Duration::from_secs(8) {
+            let _ = child.kill();
+            let _ = child.wait();
+            break None;
+        }
+        std::thread::sleep(Duration::from_millis(20));
+    };
+    let pids: Vec<i32> = fs::read_to_string(&pidfile)
+        .unwrap()
+        .lines()
+        .map(|s| s.parse().unwrap())
+        .collect();
+    let mut survivors = Vec::new();
+    for pid in pids {
+        for _ in 0..50 {
+            if !running(pid) {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        if running(pid) {
+            survivors.push(pid);
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+    }
+    assert!(
+        status.is_some_and(|s| s.success()),
+        "command did not finish within deadline"
+    );
+    assert!(started.elapsed() < Duration::from_secs(8));
+    assert!(
+        survivors.is_empty(),
+        "plugin processes left running: {survivors:?}"
+    );
+    let err = fs::read_to_string(f.cwd.join("stderr")).unwrap();
+    assert!(err.contains("meta-hung\\nFORGED\\u{1b}"), "{err}");
+    assert!(
+        err.contains("did not answer --meta-plugin-info within 5 seconds; skipping"),
+        "{err}"
+    );
+    assert!(!err.contains('\u{1b}'));
+}
+
+#[test]
+fn sleeping_probe_times_out_and_reaps_plugin() {
+    timeout_case(false);
+}
+
+#[test]
+fn exited_wrapper_with_background_stdout_times_out_and_kills_descendant() {
+    timeout_case(true);
+}
