@@ -115,11 +115,20 @@ pub enum InstallScope {
     // Future: Custom(PathBuf) for --path flag in M5
 }
 
+/// Whether `e` means the path does not exist: not found, or a part of it
+/// that is a file (`.meta/plugins` where `.meta` is the config file).
+fn missing(e: &std::io::Error) -> bool {
+    matches!(
+        e.kind(),
+        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+    )
+}
+
 impl PluginManifest {
     /// Load manifest from file, or return empty manifest if not found
     pub fn load(manifest_path: &Path) -> Result<Self> {
         match std::fs::symlink_metadata(manifest_path) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            Err(e) if missing(&e) => return Ok(Self::default()),
             Err(e) => {
                 return Err(e).with_context(|| {
                     format!("Cannot read manifest {}", escape_path(manifest_path))
@@ -706,7 +715,9 @@ impl PluginInstaller {
     /// owns it or can change it (or a directory on the way to it).
     fn check_plugins_dir(&self) -> Result<()> {
         match std::fs::symlink_metadata(&self.plugins_dir) {
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            // None there (in a workspace whose .meta is the config file,
+            // .meta/plugins is "not a directory"): no plugins
+            Err(e) if missing(&e) => Ok(()),
             _ => meta_core::data_dir::check_private_dir(&self.plugins_dir),
         }
     }

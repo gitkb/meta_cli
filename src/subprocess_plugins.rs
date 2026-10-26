@@ -726,34 +726,64 @@ impl SubprocessPluginManager {
 }
 
 /// Check if a file is executable
-/// Whether running `path` would run something a refused plugin dir or file
-/// holds: the link chain is followed one hop at a time, and a hop in a
-/// directory at or below a refused one, or at a refused file, counts. Too
-/// many hops count as well.
+/// Whether running `path` would pass through a refused plugin dir or file.
+/// The path is resolved one component at a time, following each symlink
+/// where it is met (a directory link as well as the program's own), and
+/// every location on the way is checked: one at or below a refused dir, or
+/// a refused file, counts. More than 40 links count as well.
 fn leads_into_refused(path: &Path, refused: &std::collections::HashSet<PathBuf>) -> bool {
-    let held = |hop: &Path| {
-        let dir = hop.parent().and_then(|d| d.canonicalize().ok());
-        let file = hop.canonicalize().ok();
-        refused.iter().any(|r| {
-            dir.as_deref().is_some_and(|d| d.starts_with(r)) || file.as_deref() == Some(r.as_path())
-        })
+    use std::path::Component;
+    // A location as canonicalize writes it (refused entries are written so),
+    // without resolving a link at its last component
+    let located = |at: &Path| match (at.parent(), at.file_name()) {
+        (Some(dir), Some(name)) => dir.canonicalize().ok().map(|dir| dir.join(name)),
+        _ => at.canonicalize().ok(),
     };
-    let mut hop = path.to_path_buf();
-    for _ in 0..40 {
-        if held(&hop) {
-            return true;
-        }
-        match std::fs::read_link(&hop) {
-            Ok(target) => {
-                hop = match hop.parent() {
-                    Some(dir) => dir.join(target),
-                    None => target,
+    let held = |at: &Path| located(at).is_some_and(|at| refused.iter().any(|r| at.starts_with(r)));
+    let mut pending: std::collections::VecDeque<PathBuf> = path
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    let mut current = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        match part.components().next() {
+            Some(Component::Prefix(_)) | Some(Component::RootDir) => current.push(&part),
+            Some(Component::CurDir) | None => {}
+            Some(Component::ParentDir) => {
+                current.pop();
+            }
+            Some(Component::Normal(name)) => {
+                let next = current.join(name);
+                if held(&next) {
+                    return true;
+                }
+                match std::fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        links += 1;
+                        let Ok(target) = std::fs::read_link(&next) else {
+                            return true;
+                        };
+                        if links > 40 {
+                            return true;
+                        }
+                        // The target's parts go first; an absolute one
+                        // starts again from its root
+                        if target.has_root() {
+                            current = PathBuf::new();
+                        }
+                        for (k, c) in target.components().enumerate() {
+                            pending.insert(k, PathBuf::from(c.as_os_str()));
+                        }
+                    }
+                    Ok(_) => current = next,
+                    // Not there: nothing to run through it
+                    Err(_) => return false,
                 }
             }
-            Err(_) => return false,
         }
     }
-    true
+    false
 }
 
 #[cfg(unix)]
