@@ -54,6 +54,8 @@ impl SubprocessPluginManager {
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
+        // Plugin dirs refused below, resolved: a PATH entry may lead into one
+        let mut refused = std::collections::HashSet::new();
 
         // ~/.meta/plugins/, when it exists, is refused if another user could
         // write to it. The walk up from cwd passes through it from anywhere
@@ -71,7 +73,9 @@ impl SubprocessPluginManager {
                         "warning: skipping global plugins: {}",
                         escape_lines(&format!("{e:#}"))
                     );
-                    visited.insert(dir.canonicalize().unwrap_or(dir.clone()));
+                    let resolved = dir.canonicalize().unwrap_or(dir.clone());
+                    visited.insert(resolved.clone());
+                    refused.insert(resolved);
                     false
                 }
             });
@@ -87,11 +91,14 @@ impl SubprocessPluginManager {
                 // there is skipped
                 match meta_core::data_dir::check_private_dir(&plugin_dir) {
                     Ok(()) => self.scan_directory(&plugin_dir)?,
-                    Err(e) => eprintln!(
-                        "warning: skipping plugins in {}: {}",
-                        escape_path(&plugin_dir),
-                        escape_lines(&format!("{e:#}"))
-                    ),
+                    Err(e) => {
+                        eprintln!(
+                            "warning: skipping plugins in {}: {}",
+                            escape_path(&plugin_dir),
+                            escape_lines(&format!("{e:#}"))
+                        );
+                        refused.insert(plugin_dir.canonicalize().unwrap_or(plugin_dir.clone()));
+                    }
                 }
             }
             if let Some(parent) = current_dir.parent() {
@@ -120,7 +127,7 @@ impl SubprocessPluginManager {
                 if path_dir.exists()
                     && visited.insert(path_dir.canonicalize().unwrap_or(path_dir.clone()))
                 {
-                    self.scan_path_directory(&path_dir)?;
+                    self.scan_path_directory(&path_dir, &refused)?;
                 }
             }
         }
@@ -161,22 +168,30 @@ impl SubprocessPluginManager {
         Ok(())
     }
 
-    /// Scan a PATH directory for meta-* executables
-    fn scan_path_directory(&mut self, dir: &Path) -> Result<()> {
+    /// Scan a PATH directory for meta-* executables. PATH is the user's own
+    /// choice (it is where meta and git come from too), so only a program
+    /// that resolves into a plugin dir refused above is skipped.
+    fn scan_path_directory(
+        &mut self,
+        dir: &Path,
+        refused: &std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("meta-") && is_executable(&path) {
-                        // It is run: a link into a dir another user can change
-                        // (a refused plugin dir, say) is skipped like one there
-                        match meta_core::data_dir::check_trusted_file(&path) {
-                            Ok(()) => self.try_load_plugin(&path)?,
-                            Err(e) => eprintln!(
-                                "warning: skipping plugin {}: {}",
-                                escape_path(&path),
-                                escape_lines(&format!("{e:#}"))
-                            ),
+                        let home = path
+                            .canonicalize()
+                            .ok()
+                            .and_then(|target| target.parent().map(Path::to_path_buf));
+                        if home.is_some_and(|dir| refused.contains(&dir)) {
+                            eprintln!(
+                                "warning: skipping plugin {}: it links into a refused plugin directory",
+                                escape_path(&path)
+                            );
+                        } else {
+                            self.try_load_plugin(&path)?;
                         }
                     }
                 }

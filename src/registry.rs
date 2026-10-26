@@ -1170,11 +1170,12 @@ impl PluginInstaller {
         self.check_plugins_dir()?;
         let plugin_path = self.plugins_dir.join(&plugin_name);
         if plugin_path.exists() {
+            // The manifest is checked before anything is deleted
+            let mut manifest = self.load_manifest()?;
             std::fs::remove_file(&plugin_path)
                 .with_context(|| format!("Failed to remove {}", escape_path(&plugin_path)))?;
 
             // Remove from manifest
-            let mut manifest = self.load_manifest()?;
             manifest.remove_plugin(&plugin_name);
             self.save_manifest(&manifest)?;
 
