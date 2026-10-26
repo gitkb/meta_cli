@@ -469,7 +469,21 @@ fn main() -> std::process::ExitCode {
 }
 
 fn run_cli() -> Result<()> {
-    env_logger::init();
+    // Log records carry names, versions, paths and URLs from config, the
+    // filesystem and plugin registries: escape them like other output
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                buf.timestamp(),
+                record.level(),
+                record.target(),
+                escape_lines(&record.args().to_string())
+            )
+        })
+        .init();
 
     let mut cli = Cli::parse();
 
