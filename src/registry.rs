@@ -262,7 +262,9 @@ pub struct RegistryClient {
 impl RegistryClient {
     /// Create a new registry client
     pub fn new(verbose: bool) -> Result<Self> {
-        let config = RegistryConfig::load().unwrap_or_default();
+        // A config that is refused must not fall back to the default
+        // registry: it may list a private one with the same plugin names
+        let config = RegistryConfig::load()?;
         Ok(Self {
             registries: config.get_registries(),
             verbose,

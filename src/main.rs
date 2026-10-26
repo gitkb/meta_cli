@@ -1047,15 +1047,17 @@ fn handle_plugin_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if results.is_empty() {
-                println!("No plugins found matching '{query}'");
+                println!("No plugins found matching '{}'", escape(&query));
             } else {
                 println!("Found {} plugin(s):", results.len());
                 for plugin in results {
                     println!(
                         "  {} v{} - {}",
-                        plugin.name, plugin.version, plugin.description
+                        escape(&plugin.name),
+                        escape(&plugin.version),
+                        escape(&plugin.description)
                     );
-                    println!("    by {}", plugin.author);
+                    println!("    by {}", escape(&plugin.author));
                 }
             }
         }
