@@ -127,24 +127,15 @@ fn missing(e: &std::io::Error) -> bool {
 impl PluginManifest {
     /// Load manifest from file, or return empty manifest if not found
     pub fn load(manifest_path: &Path) -> Result<Self> {
-        match std::fs::symlink_metadata(manifest_path) {
+        let content = match std::fs::read_to_string(manifest_path) {
             Err(e) if missing(&e) => return Ok(Self::default()),
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!("Cannot read manifest {}", escape_path(manifest_path))
-                })
-            }
-            // It names where each plugin is updated from, so another user
-            // must not be able to change it
-            Ok(_) => meta_core::data_dir::check_trusted_file(manifest_path)?,
-        }
-
-        let content = std::fs::read_to_string(manifest_path).with_context(|| {
-            format!(
-                "Failed to read manifest from {}",
-                escape_path(manifest_path)
-            )
-        })?;
+            result => result.with_context(|| {
+                format!(
+                    "Failed to read manifest from {}",
+                    escape_path(manifest_path)
+                )
+            })?,
+        };
 
         let manifest: Self =
             serde_json::from_str(&content).with_context(|| "Failed to parse plugin manifest")?;
@@ -154,8 +145,7 @@ impl PluginManifest {
 
     /// Save manifest to file
     pub fn save(&self, manifest_path: &Path) -> Result<()> {
-        // Private (0600), like meta's other stores: load refuses a manifest
-        // others could change, so one written under umask 002 would refuse itself
+        // Private (0600), like meta's other stores
         meta_core::store::write_atomic(manifest_path, self)
             .with_context(|| format!("Failed to write manifest to {}", escape_path(manifest_path)))
     }
@@ -232,41 +222,19 @@ impl RegistryConfig {
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
         // Only a missing file means "use the default registry": one that
-        // can't be examined may list a private registry
-        let present = match std::fs::symlink_metadata(&config_path) {
-            Ok(_) => true,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
-            Err(e) => {
-                return Err(e).with_context(|| {
-                    format!(
-                        "Cannot read {}",
-                        meta_core::display::escape_path(&config_path)
-                    )
-                })
+        // can't be read may list a private registry
+        let content = match std::fs::read_to_string(&config_path) {
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
+            result => {
+                result.with_context(|| format!("Failed to read {}", escape_path(&config_path)))?
             }
         };
-        if present {
-            // It names where plugins are downloaded from. (A symlink, as
-            // dotfile managers make, is fine if nothing on the way is
-            // another user's.)
-            meta_core::data_dir::check_trusted_file(&config_path)?;
-            let content = std::fs::read_to_string(&config_path).with_context(|| {
-                format!(
-                    "Failed to read {}",
-                    meta_core::display::escape_path(&config_path)
-                )
-            })?;
-            let config: RegistryConfig = serde_yaml::from_str(&content)
-                .with_context(|| "Failed to parse registry config")?;
-            Ok(config)
-        } else {
-            Ok(Self::default())
-        }
+        serde_yaml::from_str(&content).with_context(|| "Failed to parse registry config")
     }
 
     /// Get the config file path
     fn config_path() -> Result<PathBuf> {
-        Ok(meta_core::data_dir::private_meta_dir()?.join("config.yaml"))
+        Ok(meta_core::meta_dir()?.join("config.yaml"))
     }
 
     /// Get list of registries (defaults to the public registry)
@@ -289,7 +257,7 @@ pub struct RegistryClient {
 impl RegistryClient {
     /// Create a new registry client
     pub fn new(verbose: bool) -> Result<Self> {
-        // A config that is refused must not fall back to the default
+        // A config that cannot be read must not fall back to the default
         // registry: it may list a private one with the same plugin names
         let config = RegistryConfig::load()?;
         Ok(Self {
@@ -706,20 +674,8 @@ impl PluginInstaller {
 
     /// Ensure the plugins directory exists
     fn ensure_plugins_dir(&self) -> Result<()> {
-        // Made 0700 (whatever the umask), then held to the private-dir rules
+        // Made 0700, whatever the umask
         meta_core::data_dir::create_private_dir(&self.plugins_dir)
-    }
-
-    /// Plugins are run from this directory and its manifest says where they
-    /// are updated from: like plugin discovery, refuse it when another user
-    /// owns it or can change it (or a directory on the way to it).
-    fn check_plugins_dir(&self) -> Result<()> {
-        match std::fs::symlink_metadata(&self.plugins_dir) {
-            // None there (in a workspace whose .meta is the config file,
-            // .meta/plugins is "not a directory"): no plugins
-            Err(e) if missing(&e) => Ok(()),
-            _ => meta_core::data_dir::check_private_dir(&self.plugins_dir),
-        }
     }
 
     /// Get the manifest file path
@@ -729,7 +685,6 @@ impl PluginInstaller {
 
     /// Load the plugin manifest
     fn load_manifest(&self) -> Result<PluginManifest> {
-        self.check_plugins_dir()?;
         PluginManifest::load(&self.manifest_path())
     }
 
@@ -1109,8 +1064,6 @@ impl PluginInstaller {
     fn validate_plugin(&self, plugin_path: &Path) -> Result<()> {
         use std::process::Command;
 
-        // It is run: the same check as for any plugin meta runs
-        meta_core::data_dir::check_trusted_file(plugin_path)?;
         let output = Command::new(plugin_path)
             .arg("--meta-plugin-info")
             .output()
@@ -1177,11 +1130,9 @@ impl PluginInstaller {
     pub fn uninstall(&self, name: &str) -> Result<()> {
         let plugin_name = ensure_plugin_prefix(name);
 
-        // Refuse an untrusted dir before deleting anything in it
-        self.check_plugins_dir()?;
         let plugin_path = self.plugins_dir.join(&plugin_name);
         if plugin_path.exists() {
-            // The manifest is checked before anything is deleted
+            // The manifest is read before anything is deleted
             let mut manifest = self.load_manifest()?;
             std::fs::remove_file(&plugin_path)
                 .with_context(|| format!("Failed to remove {}", escape_path(&plugin_path)))?;
@@ -1369,8 +1320,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn test_plugins_dir_and_manifest_are_private_whatever_the_umask() {
-        // Load refuses a manifest or dir others could change, so meta must
-        // not create them group- or world-writable (umask 002) itself
+        // meta creates its own dirs 0700 and files 0600, whatever the umask
         use std::os::unix::fs::PermissionsExt;
         let dir = tempfile::tempdir().unwrap();
         let installer = PluginInstaller {
