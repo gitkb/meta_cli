@@ -480,7 +480,8 @@ fn run_cli() -> Result<()> {
                 buf.timestamp(),
                 record.level(),
                 record.target(),
-                escape_lines(&record.args().to_string())
+                // Newlines too: one from data could forge a log line
+                escape(&record.args().to_string())
             )
         })
         .init();

@@ -319,7 +319,10 @@ impl SubprocessPluginManager {
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
-            // Plugin already printed its error to stderr, just propagate the exit code
+            // Plugin already printed its error to stderr. What it printed
+            // before failing (say the worktrees it removed before a store
+            // error) is shown too; then its exit code is propagated.
+            print!("{}", String::from_utf8_lossy(&output.stdout));
             std::process::exit(output.status.code().unwrap_or(1));
         }
 
