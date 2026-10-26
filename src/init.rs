@@ -115,7 +115,7 @@ pub enum InitCommand {
     None,
     /// Install Claude Code skills, rules, and hooks
     Claude {
-        /// Overwrite all existing files including settings
+        /// Refresh skills and rules, merge meta hooks into settings
         force: bool,
         /// Update skills and rules only, skip settings (preserves user customizations)
         update: bool,
@@ -143,13 +143,13 @@ fn print_init_help() {
     println!("    claude    Install Claude Code skills, rules, and hooks for this meta repo");
     println!();
     println!("OPTIONS:");
-    println!("    -f, --force     Overwrite all existing files including settings");
+    println!("    -f, --force     Refresh skills and rules, merge meta hooks into settings");
     println!("    -u, --update    Update skills and rules only, preserve settings");
     println!();
     println!("EXAMPLES:");
     println!("    meta init claude             Install Claude integration");
     println!("    meta init claude --update    Update skills/rules, keep settings");
-    println!("    meta init claude --force     Overwrite everything");
+    println!("    meta init claude --force     Refresh skills/rules and merge settings");
 }
 
 /// Install Claude Code skills and hook configuration
@@ -189,7 +189,14 @@ fn install_claude_integration_to(
         println!();
     }
 
-    let mut merged = false;
+    // Build and validate settings before writing any skills or rules.
+    let settings_path = claude_dir.join("settings.json");
+    let settings_link = symlink_in(target_dir, Path::new(".claude/settings.json"));
+    let settings_plan = if update || settings_link.is_some() {
+        None
+    } else {
+        Some(prepare_settings(&settings_path)?)
+    };
 
     // --force or --update: overwrite; default: skip existing
     let overwrite_content = force || update;
@@ -227,19 +234,19 @@ fn install_claude_integration_to(
                     .next()
                     .is_some_and(|l| FLAT_SKILL_HEADINGS.contains(&l))
             });
-        if overwrite_content && is_file && !shipped {
-            println!(
-                "{} {} (not created by meta, left alone)",
-                "Skipped".yellow(),
-                escape_path(&flat_path)
-            );
-            skipped += 1;
-        } else if overwrite_content && shipped {
+        if overwrite_content && shipped {
             fs::remove_file(&flat_path)
                 .with_context(|| format!("Failed to remove {}", escape_path(&flat_path)))?;
             if verbose {
                 println!("{} {}", "Removed".yellow(), escape_path(&flat_path));
             }
+        } else if fs::symlink_metadata(&flat_path).is_ok() {
+            println!(
+                "{} {} (left alone)",
+                "Skipped".yellow(),
+                escape_path(&flat_path)
+            );
+            skipped += 1;
         }
     }
 
@@ -271,37 +278,28 @@ fn install_claude_integration_to(
         installed += 1;
     }
 
-    // Install/merge settings.json with hook configuration
-    // --update: skip entirely (preserve user settings)
-    // --force: overwrite completely
-    // default: merge meta hooks into existing settings
-    let settings_path = claude_dir.join("settings.json");
+    // --update leaves settings untouched; --force uses the same merge as default.
     if update {
-        if verbose {
-            println!(
-                "{} settings.json (--update preserves settings)",
-                "Skipped".yellow()
-            );
-        }
+        println!("Skipped .claude/settings.json (--update preserves settings)");
         skipped += 1;
-    } else if let Some(link) = symlink_in(target_dir, Path::new(".claude/settings.json")) {
+    } else if let Some(link) = settings_link {
         println!(
-            "{} .claude/settings.json (reached through the symlink {}, not followed)",
-            "Skipped".yellow(),
+            "Skipped .claude/settings.json (reached through the symlink {}, not followed)",
             escape_path(&link)
         );
         skipped += 1;
-    } else {
-        let result = install_settings(&settings_path, force, verbose)?;
-        match result {
-            SettingsResult::Created => installed += 1,
-            SettingsResult::Overwritten => installed += 1,
-            SettingsResult::Merged => {
-                merged = true;
-                installed += 1;
-            }
+    } else if let Some(plan) = settings_plan {
+        if let Some(content) = plan.content {
+            write_settings_atomic(&settings_path, &content)?;
+            installed += 1;
         }
+        println!("{} {}", plan.message, escape_path(&settings_path));
     }
+    let present_hooks = fs::read_to_string(&settings_path)
+        .ok()
+        .and_then(|content| serde_json::from_str::<Value>(&content).ok())
+        .map(|settings| installed_hooks(&settings))
+        .unwrap_or_default();
 
     // Print summary
     println!();
@@ -324,17 +322,11 @@ fn install_claude_integration_to(
             skills.copied
         );
     }
-    if merged {
-        println!(
-            "{} Merged meta hooks into existing settings.json",
-            "✓".green()
-        );
-    }
     if skipped > 0 {
         let hint = if update {
             "(--update preserves settings)"
         } else {
-            "(use --force to overwrite, --update to refresh content)"
+            "(use --force or --update to refresh skills and rules)"
         };
         println!(
             "{} Skipped {} existing file(s) {}",
@@ -344,7 +336,7 @@ fn install_claude_integration_to(
         );
     }
 
-    if installed > 0 || merged {
+    if installed > 0 {
         println!();
         println!("Claude Code is now configured for this meta repository:");
         println!(
@@ -353,12 +345,17 @@ fn install_claude_integration_to(
             skills.agent_dirs.join(", ")
         );
         println!("  Rules:   .claude/rules/ ({} rule files)", RULES.len());
-        println!("  Hooks:   .claude/settings.json (SessionStart, PreToolUse, PreCompact)");
+        if !present_hooks.is_empty() {
+            println!(
+                "  Hooks:   .claude/settings.json ({})",
+                present_hooks.join(", ")
+            );
+        }
         println!("  Note:    PreToolUse hooks require the standalone agent CLI (`agent guard`).");
     }
 
     #[cfg(not(test))]
-    if (installed > 0 || merged) && !agent_cli_available() {
+    if (installed > 0) && !agent_cli_available() {
         println!(
             "{}",
             "Warning: 'agent' CLI not found. PreToolUse hooks require the standalone agent tool."
@@ -367,10 +364,10 @@ fn install_claude_integration_to(
         println!("Install from: https://github.com/gitkb/agent");
     }
 
-    // Try to register GitKB marketplace if claude CLI is available
-    // Skip in tests to avoid external CLI calls that slow down test execution
-    #[cfg(not(test))]
-    register_marketplace(verbose);
+    println!();
+    println!("For global Claude plugin access, run:");
+    println!("  claude plugin marketplace add gitkb/claude-plugins");
+    println!("  claude plugin install meta@gitkb");
 
     Ok(())
 }
@@ -457,13 +454,11 @@ fn install_skills_with(
         }
         let path = root.join(&rel);
         if path.exists() && !overwrite {
-            if verbose {
-                println!(
-                    "{} {} (already exists)",
-                    "Skipped".yellow(),
-                    escape_path(&path)
-                );
-            }
+            println!(
+                "{} {} (already exists)",
+                "Skipped".yellow(),
+                escape_path(&path)
+            );
             report.skipped += 1;
             continue;
         }
@@ -503,16 +498,13 @@ fn install_skills_with(
             let legacy = agent.legacy.then_some(*content);
             match skill_entry(&link, &target, &marker, legacy) {
                 SkillEntry::Missing => {}
-                SkillEntry::Linked => continue,
+                SkillEntry::Linked => {
+                    println!("Skipped {} (already linked)", escape_path(&link));
+                    continue;
+                }
                 SkillEntry::Owned if overwrite => remove_owned(&link, &marker)?,
                 SkillEntry::Owned => {
-                    if verbose {
-                        println!(
-                            "{} {} (already exists)",
-                            "Skipped".yellow(),
-                            escape_path(&link)
-                        );
-                    }
+                    println!("Skipped {} (already exists)", escape_path(&link));
                     report.skipped += 1;
                     continue;
                 }
@@ -642,56 +634,70 @@ fn copy_skill(source: &Path, dir: &Path, marker: &str) -> Result<()> {
     Ok(())
 }
 
-/// Result of settings installation
-enum SettingsResult {
-    Created,
-    Overwritten,
-    Merged,
+struct SettingsPlan {
+    content: Option<String>,
+    message: String,
 }
 
-/// Install or merge settings.json
-fn install_settings(settings_path: &Path, force: bool, verbose: bool) -> Result<SettingsResult> {
-    let meta_hooks = build_meta_hooks();
-
-    if !settings_path.exists() {
-        // Fresh install: create new settings with meta hooks
-        let settings = json!({ "hooks": meta_hooks });
-        let content = serde_json::to_string_pretty(&settings)?;
-        write_file(settings_path, &content, verbose)?;
-        return Ok(SettingsResult::Created);
-    }
-
-    if force {
-        // Force: overwrite completely
-        let settings = json!({ "hooks": meta_hooks });
-        let content = serde_json::to_string_pretty(&settings)?;
-        write_file(settings_path, &content, verbose)?;
-        return Ok(SettingsResult::Overwritten);
-    }
-
-    // Merge: read existing, deep-merge hooks, write back
-    let existing_content = fs::read_to_string(settings_path)
-        .with_context(|| format!("Failed to read {}", escape_path(settings_path)))?;
-
-    let existing: Value = serde_json::from_str(&existing_content)
-        .with_context(|| format!("Failed to parse {}", escape_path(settings_path)))?;
-
-    let merged = merge_hooks_into_settings(existing, meta_hooks);
-    let content = serde_json::to_string_pretty(&merged)?;
-    fs::write(settings_path, &content)
-        .with_context(|| format!("Failed to write {}", escape_path(settings_path)))?;
-
-    if verbose {
-        println!(
-            "{} {} (merged)",
-            "Wrote".green(),
-            escape_path(settings_path)
-        );
+fn prepare_settings(path: &Path) -> Result<SettingsPlan> {
+    let existing = match fs::read_to_string(path) {
+        Ok(content) => Some(
+            serde_json::from_str::<Value>(&content)
+                .with_context(|| format!("Invalid JSON in {} at key '$'", escape_path(path)))?,
+        ),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => return Err(e).with_context(|| format!("Failed to read {}", escape_path(path))),
+    };
+    let created = existing.is_none();
+    let existing = existing.unwrap_or_else(|| json!({}));
+    let before = installed_hooks(&existing);
+    let merged = merge_hooks_into_settings(existing, build_meta_hooks(), path)?;
+    let added: Vec<_> = installed_hooks(&merged)
+        .into_iter()
+        .filter(|key| !before.contains(key))
+        .collect();
+    let message = if created {
+        "Created".to_string()
+    } else if added.is_empty() {
+        "Already has meta's hooks (no write):".to_string()
     } else {
-        println!("  {} settings.json (merged)", "✓".green());
-    }
+        format!("Added {} hooks to", added.join(", "))
+    };
+    let content = if created || !added.is_empty() {
+        Some(serde_json::to_string_pretty(&merged)?)
+    } else {
+        None
+    };
+    Ok(SettingsPlan { content, message })
+}
 
-    Ok(SettingsResult::Merged)
+fn write_settings_atomic(path: &Path, content: &str) -> Result<()> {
+    use std::io::Write;
+    let parent = path.parent().context("Settings path has no parent")?;
+    let mut temp = tempfile::NamedTempFile::new_in(parent).with_context(|| {
+        format!(
+            "Failed to create temporary settings in {}",
+            escape_path(parent)
+        )
+    })?;
+    temp.write_all(content.as_bytes())?;
+    temp.persist(path)
+        .with_context(|| format!("Failed to write {}", escape_path(path)))?;
+    Ok(())
+}
+
+fn installed_hooks(settings: &Value) -> Vec<String> {
+    build_meta_hooks()
+        .into_iter()
+        .filter_map(|(key, groups)| {
+            let existing = settings.get("hooks")?.get(&key)?.as_array()?;
+            groups
+                .as_array()?
+                .iter()
+                .all(|group| existing.contains(group))
+                .then_some(key)
+        })
+        .collect()
 }
 
 /// Build the meta hooks configuration as a JSON object
@@ -739,68 +745,42 @@ fn build_meta_hooks() -> Map<String, Value> {
 }
 
 /// Merge meta hooks into existing settings, preserving other settings
-fn merge_hooks_into_settings(mut existing: Value, meta_hooks: Map<String, Value>) -> Value {
-    // Ensure existing has a hooks object
-    if !existing.is_object() {
-        return json!({ "hooks": meta_hooks });
-    }
-
-    let obj = existing.as_object_mut().unwrap();
-
-    // Get or create the hooks object
+fn merge_hooks_into_settings(
+    mut existing: Value,
+    meta_hooks: Map<String, Value>,
+    path: &Path,
+) -> Result<Value> {
+    let invalid = |key: &str, shape: &str| {
+        anyhow::anyhow!(
+            "Cannot merge {}: key '{}' must be {}",
+            escape_path(path),
+            key,
+            shape
+        )
+    };
+    let obj = existing
+        .as_object_mut()
+        .ok_or_else(|| invalid("$", "an object"))?;
     let hooks = obj
         .entry("hooks")
         .or_insert_with(|| json!({}))
-        .as_object_mut();
-
-    if let Some(hooks) = hooks {
-        // For each lifecycle key in meta_hooks, append to existing array
-        for (lifecycle, meta_hook_array) in meta_hooks {
-            if let Some(existing_array) = hooks.get_mut(&lifecycle) {
-                // Existing array: append meta hooks
-                if let Some(arr) = existing_array.as_array_mut() {
-                    if let Some(meta_arr) = meta_hook_array.as_array() {
-                        for hook in meta_arr {
-                            // Avoid duplicates by checking if hook already exists
-                            if !arr.iter().any(|h| hooks_equal(h, hook)) {
-                                arr.push(hook.clone());
-                            }
-                        }
-                    }
+        .as_object_mut()
+        .ok_or_else(|| invalid("hooks", "an object"))?;
+    for (key, groups) in meta_hooks {
+        let arr = hooks
+            .entry(&key)
+            .or_insert_with(|| json!([]))
+            .as_array_mut()
+            .ok_or_else(|| invalid(&format!("hooks.{key}"), "an array"))?;
+        if let Some(groups) = groups.as_array() {
+            for group in groups {
+                if !arr.contains(group) {
+                    arr.push(group.clone());
                 }
-            } else {
-                // No existing array: add meta hooks
-                hooks.insert(lifecycle, meta_hook_array);
             }
         }
-    } else {
-        // hooks is not an object, replace it
-        obj.insert("hooks".to_string(), json!(meta_hooks));
     }
-
-    existing
-}
-
-/// Check if two hook entries are effectively equal (same type and command/prompt)
-fn hooks_equal(a: &Value, b: &Value) -> bool {
-    // Compare the hooks array within each group
-    let a_hooks = a.get("hooks").and_then(|h| h.as_array());
-    let b_hooks = b.get("hooks").and_then(|h| h.as_array());
-
-    match (a_hooks, b_hooks) {
-        (Some(a_arr), Some(b_arr)) => {
-            if a_arr.len() != b_arr.len() {
-                return false;
-            }
-            a_arr.iter().zip(b_arr.iter()).all(|(a_hook, b_hook)| {
-                let same_type = a_hook.get("type") == b_hook.get("type");
-                let same_command = a_hook.get("command") == b_hook.get("command");
-                let same_prompt = a_hook.get("prompt") == b_hook.get("prompt");
-                same_type && same_command && same_prompt
-            })
-        }
-        _ => false,
-    }
+    Ok(existing)
 }
 
 #[cfg(not(test))]
@@ -814,58 +794,6 @@ fn agent_cli_available() -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-/// Register the GitKB marketplace with Claude Code (if available).
-/// This is best-effort — if `claude` is not on PATH, skip silently.
-#[cfg(not(test))]
-fn register_marketplace(verbose: bool) {
-    use std::process::Command;
-
-    // Check if claude CLI is available
-    let claude_available = Command::new("claude")
-        .arg("--version")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-
-    if !claude_available {
-        if verbose {
-            println!(
-                "{} Claude CLI not found, skipping marketplace registration",
-                "•".yellow()
-            );
-        }
-        return;
-    }
-
-    // Register the marketplace (idempotent)
-    let result = Command::new("claude")
-        .args(["plugin", "marketplace", "add", "gitkb/claude-plugins"])
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-
-    match result {
-        Ok(status) if status.success() => {
-            println!();
-            println!("{} Registered GitKB plugin marketplace", "✓".green());
-            println!(
-                "  Run {} for global plugin access",
-                "claude plugin install meta@gitkb".cyan()
-            );
-        }
-        _ => {
-            if verbose {
-                println!(
-                    "{} Failed to register marketplace (non-fatal)",
-                    "•".yellow()
-                );
-            }
-        }
-    }
 }
 
 fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
@@ -887,6 +815,71 @@ fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
 mod tests {
     use super::*;
     use tempfile::tempdir;
+
+    #[test]
+    fn invalid_settings_leave_every_file_unchanged_even_with_force() {
+        fn snapshot(root: &Path) -> Vec<(PathBuf, Option<Vec<u8>>)> {
+            let mut entries = Vec::new();
+            for entry in fs::read_dir(root).unwrap() {
+                let path = entry.unwrap().path();
+                if path.is_dir() {
+                    entries.push((path.clone(), None));
+                    entries.extend(snapshot(&path));
+                } else {
+                    entries.push((path.clone(), Some(fs::read(&path).unwrap())));
+                }
+            }
+            entries.sort();
+            entries
+        }
+        for (content, key) in [
+            (r#"[{"user":"data"}]"#, "$"),
+            (r#"{"hooks":[],"theme":"dark"}"#, "hooks"),
+            (r#"{"hooks":{"PreToolUse":{}}}"#, "hooks.PreToolUse"),
+            ("{invalid json", "$"),
+        ] {
+            let dir = tempdir().unwrap();
+            fs::create_dir_all(dir.path().join(".claude/rules")).unwrap();
+            fs::write(
+                dir.path()
+                    .join(".claude/rules/meta-workspace-discipline.md"),
+                "keep this rule",
+            )
+            .unwrap();
+            let settings = dir.path().join(".claude/settings.json");
+            fs::write(&settings, content).unwrap();
+            let before = snapshot(dir.path());
+            for force in [false, true] {
+                let err =
+                    install_claude_integration_to(dir.path(), force, false, false).unwrap_err();
+                let message = format!("{err:#}");
+                assert!(message.contains(&escape_path(&settings)), "{message}");
+                assert!(message.contains(&format!("key '{key}'")), "{message}");
+                assert_eq!(snapshot(dir.path()), before);
+            }
+        }
+    }
+
+    #[test]
+    fn settings_plan_compares_matchers_and_reports_no_write() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("settings.json");
+        let mut settings = json!({"hooks": build_meta_hooks(), "theme": "dark"});
+        settings["hooks"]["PreToolUse"][0]["matcher"] = json!("Read");
+        fs::write(&path, serde_json::to_string(&settings).unwrap()).unwrap();
+        let plan = prepare_settings(&path).unwrap();
+        assert_eq!(plan.message, "Added PreToolUse hooks to");
+        let content = plan.content.unwrap();
+        let merged: Value = serde_json::from_str(&content).unwrap();
+        assert_eq!(merged["theme"], "dark");
+        assert_eq!(merged["hooks"]["PreToolUse"].as_array().unwrap().len(), 2);
+        assert_eq!(merged["hooks"]["PreToolUse"][1]["matcher"], "Bash");
+        write_settings_atomic(&path, &content).unwrap();
+        let plan = prepare_settings(&path).unwrap();
+        assert_eq!(plan.message, "Already has meta's hooks (no write):");
+        assert!(plan.content.is_none());
+        assert_eq!(fs::read_to_string(path).unwrap(), content);
+    }
 
     #[test]
     fn test_install_creates_skills_rules_and_settings() {
@@ -1002,12 +995,12 @@ mod tests {
         let rule_content = fs::read_to_string(&existing_rule).unwrap();
         assert!(rule_content.contains("Meta Workspace Discipline"));
 
-        // Settings should be overwritten (not merged)
+        // --force still merges settings.
         let settings_content = fs::read_to_string(&existing_settings).unwrap();
         let settings: Value = serde_json::from_str(&settings_content).unwrap();
         assert!(
-            settings.get("custom").is_none(),
-            "should not preserve custom key with --force"
+            settings.get("custom").is_some(),
+            "should preserve custom key with --force"
         );
         assert!(settings.get("hooks").is_some(), "should have hooks");
     }
@@ -1466,7 +1459,8 @@ mod tests {
         });
 
         let meta_hooks = build_meta_hooks();
-        let merged = merge_hooks_into_settings(existing, meta_hooks);
+        let merged =
+            merge_hooks_into_settings(existing, meta_hooks, Path::new("settings.json")).unwrap();
 
         // Should preserve existing Stop hook
         assert!(merged["hooks"]["Stop"].is_array());
@@ -1500,7 +1494,8 @@ mod tests {
         });
 
         let meta_hooks = build_meta_hooks();
-        let merged = merge_hooks_into_settings(existing, meta_hooks);
+        let merged =
+            merge_hooks_into_settings(existing, meta_hooks, Path::new("settings.json")).unwrap();
 
         // Should NOT duplicate SessionStart hook
         let session_hooks = merged["hooks"]["SessionStart"].as_array().unwrap();

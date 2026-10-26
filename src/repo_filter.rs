@@ -74,10 +74,11 @@ pub fn select(
         let listed = |repos: &[&Repo]| -> String {
             repos
                 .iter()
-                .map(|r| r.path.as_str())
+                .map(|r| meta_core::display::escape(&r.path))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let value = meta_core::display::escape(value);
         if by_name.len() > 1 {
             bail!(
                 "{flag} '{value}' is the .meta name of the repos at {}; name one by its path, \

@@ -177,7 +177,7 @@ struct InitArgs {
 enum InitCommands {
     /// Install Claude Code skills, rules, and hooks for this meta repo
     Claude {
-        /// Overwrite all existing files including settings
+        /// Refresh skills and rules, merge meta hooks into settings
         #[arg(short, long)]
         force: bool,
 
@@ -287,10 +287,15 @@ fn write_help_with_plugin_commands(
         commands.push((name, desc, Some(plugin)));
     }
 
-    // Plugin commands (e.g., "git", "project", "rust")
+    // Plugin namespaces must be claimed commands, not merely plugin names.
     // These are invoked as `meta <plugin> <subcommand>`
     // Mark them with plugin name and version suffix
     for (name, version, description) in plugins.list_plugins() {
+        if !plugins.available_commands().iter().any(|(command, owner)| {
+            *owner == name && command.split_whitespace().next() == Some(name)
+        }) {
+            continue;
+        }
         commands.push((
             name.to_string(),
             description.to_string(),
@@ -459,6 +464,12 @@ fn print_plugin_update_help() {
 fn main() -> std::process::ExitCode {
     match run_cli() {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e)
+            if e.downcast_ref::<loop_lib::StdoutError>()
+                .is_some_and(|e| e.0.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            std::process::ExitCode::SUCCESS
+        }
         Err(e) => {
             // as Rust prints an error returned from main, but escaped: it can
             // carry paths and names from git and the filesystem
@@ -673,6 +684,16 @@ fn handle_command_dispatch(
         );
         defaults.parallel
     };
+
+    if !is_explicit_exec
+        && command_args.first().is_some_and(|s| s == "project")
+        && command_args
+            .get(1)
+            .is_some_and(|s| s == "list" || s == "ls")
+        && (cli.include.is_some() || cli.exclude.is_some())
+    {
+        anyhow::bail!("meta project list does not take --include/--exclude");
+    }
 
     let command_str = loop_lib::display_command(&command_args);
 
@@ -1416,8 +1437,9 @@ fn unrecognized_command_error(
     eprintln!(
         "{}: unrecognized command '{}'",
         "error".red().bold(),
-        first_cmd
+        escape(first_cmd)
     );
+    let command_str = escape(command_str);
     eprintln!();
     eprintln!("To run '{command_str}' across all repos:");
     eprintln!("    meta exec -- {command_str}");
