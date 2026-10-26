@@ -218,7 +218,21 @@ impl RegistryConfig {
     /// Load registry config from ~/.meta/config.yaml
     pub fn load() -> Result<Self> {
         let config_path = Self::config_path()?;
-        if std::fs::symlink_metadata(&config_path).is_ok() {
+        // Only a missing file means "use the default registry": one that
+        // can't be examined may list a private registry
+        let present = match std::fs::symlink_metadata(&config_path) {
+            Ok(_) => true,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => false,
+            Err(e) => {
+                return Err(e).with_context(|| {
+                    format!(
+                        "Cannot read {}",
+                        meta_core::display::escape_path(&config_path)
+                    )
+                })
+            }
+        };
+        if present {
             // It names where plugins are downloaded from. (A symlink, as
             // dotfile managers make, is fine if nothing on the way is
             // another user's.)
