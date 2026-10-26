@@ -740,7 +740,13 @@ fn leads_into_refused(path: &Path, refused: &std::collections::HashSet<PathBuf>)
         _ => at.canonicalize().ok(),
     };
     let held = |at: &Path| located(at).is_some_and(|at| refused.iter().any(|r| at.starts_with(r)));
-    let mut pending: std::collections::VecDeque<PathBuf> = path
+    // From the absolute path, so a relative PATH entry's `..` is resolved
+    // against where it really leads
+    let absolute = match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => return true,
+    };
+    let mut pending: std::collections::VecDeque<PathBuf> = absolute
         .components()
         .map(|c| PathBuf::from(c.as_os_str()))
         .collect();
