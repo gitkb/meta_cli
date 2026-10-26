@@ -129,19 +129,27 @@ impl SubprocessPluginManager {
     /// Discover and load all subprocess plugins
     ///
     /// Discovery order (first match wins):
-    /// 1. The nearest workspace's `.meta/plugins/` (project-local)
+    /// 1. `.meta/plugins/` of each meta directory from the nearest one up to
+    ///    its workspace's root (`meta_core::config::workspace_root`)
     /// 2. `meta_core::meta_dir()/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
-        // Local plugins belong only to the nearest workspace, independently of --config.
+        // Project plugins: those of each meta directory from the nearest one
+        // up to its workspace's root, nearest first, independently of --config
         let cwd = std::env::current_dir()?;
-        if let Some(root) = meta_core::config::find_workspace_root(&cwd)? {
-            let plugin_dir = root.join(".meta/plugins");
-            if visited.insert(resolved(&plugin_dir)) {
-                self.scan_directory(&plugin_dir)?;
+        if let Some(nearest) = meta_core::config::nearest_meta_dir(&cwd)? {
+            let root = meta_core::config::workspace_root(&nearest);
+            for dir in nearest.ancestors().take_while(|dir| dir.starts_with(&root)) {
+                if meta_core::config::find_meta_config_in(dir)?.is_none() {
+                    continue;
+                }
+                let plugin_dir = dir.join(".meta/plugins");
+                if visited.insert(resolved(&plugin_dir)) {
+                    self.scan_directory(&plugin_dir)?;
+                }
             }
         }
 
@@ -174,7 +182,15 @@ impl SubprocessPluginManager {
 
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+            // A legacy `.meta` config file in place of the `.meta/` folder means no plugins
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(())
+            }
             Err(e) => {
                 eprintln!(
                     "Warning: Cannot read plugins directory {}: {}; skipping",

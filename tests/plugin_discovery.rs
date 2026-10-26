@@ -119,6 +119,22 @@ fn discovery_stops_at_nearest_workspace_and_uses_global_data_dir() {
 }
 
 #[test]
+fn nested_meta_dir_reads_its_workspace_plugins_but_not_an_unlisting_parent() {
+    let f = Fixture::new(true);
+    plugin(&f.home.join(".meta/plugins/meta-parent"), "parent", "1");
+    let listed = |yaml: &str| {
+        fs::write(f.home.join(".meta.yaml"), yaml).unwrap();
+        let output = f.run(&["plugin", "list", "--json"]);
+        assert!(output.status.success());
+        String::from_utf8_lossy(&output.stdout).contains("parent")
+    };
+    // The parent lists this meta dir: one workspace, its plugins load here
+    assert!(listed("projects:\n  workspace:\n    repo: x\n    meta: true\n"));
+    // A parent that doesn't list it is another workspace
+    assert!(!listed("projects: {}\n"));
+}
+
+#[test]
 fn explicit_config_does_not_redirect_plugin_scope() {
     let f = Fixture::new(true);
     let other = f.home.join("other");
@@ -277,6 +293,15 @@ fn orphan_hint_names_actual_parent_config() {
             "{err}"
         );
     }
+}
+
+#[test]
+fn legacy_meta_config_file_means_no_project_plugins_without_a_warning() {
+    let f = Fixture::new(false);
+    fs::write(f.cwd.join(".meta"), "{\"projects\": {}}\n").unwrap();
+    let out = f.run(&["exec", "--", "true"]);
+    assert!(out.status.success());
+    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
 }
 
 #[test]

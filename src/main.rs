@@ -1160,7 +1160,7 @@ fn handle_plugin_command(
             }
             if local {
                 let cwd = std::env::current_dir()?;
-                if config::find_workspace_root(&cwd)?.is_none() {
+                if config::nearest_meta_dir(&cwd)?.is_none() {
                     if !json {
                         println!("Not in a meta workspace");
                     }
