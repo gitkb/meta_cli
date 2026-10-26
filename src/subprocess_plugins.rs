@@ -90,7 +90,7 @@ impl SubprocessPluginManager {
                 // Plugins are run, so one that another user could have put
                 // there is skipped
                 match meta_core::data_dir::check_private_dir(&plugin_dir) {
-                    Ok(()) => self.scan_directory(&plugin_dir)?,
+                    Ok(()) => self.scan_directory(&plugin_dir, &mut refused)?,
                     Err(e) => {
                         eprintln!(
                             "warning: skipping plugins in {}: {}",
@@ -115,7 +115,7 @@ impl SubprocessPluginManager {
                     .canonicalize()
                     .unwrap_or(global_plugins.clone()),
             ) {
-                self.scan_directory(&global_plugins)?;
+                self.scan_directory(&global_plugins, &mut refused)?;
             }
         }
 
@@ -136,7 +136,11 @@ impl SubprocessPluginManager {
     }
 
     /// Scan a .meta-plugins directory for plugin executables
-    fn scan_directory(&mut self, dir: &Path) -> Result<()> {
+    fn scan_directory(
+        &mut self,
+        dir: &Path,
+        refused: &mut std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
         if self.verbose {
             println!("Scanning for subprocess plugins in: {}", escape_path(dir));
         }
@@ -156,11 +160,14 @@ impl SubprocessPluginManager {
                     // It is run: skip it if another user could have changed it
                     match meta_core::data_dir::check_trusted_file(&path) {
                         Ok(()) => self.try_load_plugin(&path)?,
-                        Err(e) => eprintln!(
-                            "warning: skipping plugin {}: {}",
-                            escape_path(&path),
-                            escape_lines(&format!("{e:#}"))
-                        ),
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping plugin {}: {}",
+                                escape_path(&path),
+                                escape_lines(&format!("{e:#}"))
+                            );
+                            refused.insert(path.canonicalize().unwrap_or(path.clone()));
+                        }
                     }
                 }
             }
@@ -170,7 +177,8 @@ impl SubprocessPluginManager {
 
     /// Scan a PATH directory for meta-* executables. PATH is the user's own
     /// choice (it is where meta and git come from too), so only a program
-    /// that resolves into a plugin dir refused above is skipped.
+    /// that leads into a plugin dir or file refused above, through any of
+    /// its links, is skipped.
     fn scan_path_directory(
         &mut self,
         dir: &Path,
@@ -181,11 +189,7 @@ impl SubprocessPluginManager {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("meta-") && is_executable(&path) {
-                        let home = path
-                            .canonicalize()
-                            .ok()
-                            .and_then(|target| target.parent().map(Path::to_path_buf));
-                        if home.is_some_and(|dir| refused.contains(&dir)) {
+                        if leads_into_refused(&path, refused) {
                             eprintln!(
                                 "warning: skipping plugin {}: it links into a refused plugin directory",
                                 escape_path(&path)
@@ -722,6 +726,36 @@ impl SubprocessPluginManager {
 }
 
 /// Check if a file is executable
+/// Whether running `path` would run something a refused plugin dir or file
+/// holds: the link chain is followed one hop at a time, and a hop in a
+/// directory at or below a refused one, or at a refused file, counts. Too
+/// many hops count as well.
+fn leads_into_refused(path: &Path, refused: &std::collections::HashSet<PathBuf>) -> bool {
+    let held = |hop: &Path| {
+        let dir = hop.parent().and_then(|d| d.canonicalize().ok());
+        let file = hop.canonicalize().ok();
+        refused.iter().any(|r| {
+            dir.as_deref().is_some_and(|d| d.starts_with(r)) || file.as_deref() == Some(r.as_path())
+        })
+    };
+    let mut hop = path.to_path_buf();
+    for _ in 0..40 {
+        if held(&hop) {
+            return true;
+        }
+        match std::fs::read_link(&hop) {
+            Ok(target) => {
+                hop = match hop.parent() {
+                    Some(dir) => dir.join(target),
+                    None => target,
+                }
+            }
+            Err(_) => return false,
+        }
+    }
+    true
+}
+
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
