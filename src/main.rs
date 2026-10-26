@@ -5,6 +5,7 @@ use loop_lib::run;
 use meta_core::config::{
     self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
 };
+use meta_core::display::{escape, escape_lines, escape_path};
 use std::io::Write;
 use std::path::PathBuf;
 
@@ -455,8 +456,35 @@ fn print_plugin_update_help() {
 
 // === Main Entry Point ===
 
-fn main() -> Result<()> {
-    env_logger::init();
+fn main() -> std::process::ExitCode {
+    match run_cli() {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e) => {
+            // as Rust prints an error returned from main, but escaped: it can
+            // carry paths and names from git and the filesystem
+            eprintln!("Error: {}", escape_lines(&format!("{e:?}")));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
+
+fn run_cli() -> Result<()> {
+    // Log records carry names, versions, paths and URLs from config, the
+    // filesystem and plugin registries: escape them like other output
+    env_logger::Builder::from_default_env()
+        .format(|buf, record| {
+            use std::io::Write;
+            writeln!(
+                buf,
+                "[{} {} {}] {}",
+                buf.timestamp(),
+                record.level(),
+                record.target(),
+                // Newlines too: one from data could forge a log line
+                escape(&record.args().to_string())
+            )
+        })
+        .init();
 
     let mut cli = Cli::parse();
 
@@ -641,7 +669,7 @@ fn handle_command_dispatch(
         log::debug!(
             "parallel={} (from config defaults, cwd={})",
             defaults.parallel,
-            cwd.display()
+            escape_path(&cwd)
         );
         defaults.parallel
     };
@@ -700,7 +728,7 @@ fn handle_command_dispatch(
             if cli.verbose {
                 eprintln!(
                     "Detected worktree context: '{}' ({} repos)",
-                    task_name,
+                    escape(&task_name),
                     wt_paths.len()
                 );
             }
@@ -743,7 +771,7 @@ fn handle_command_dispatch(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
                         "warning".yellow().bold(),
                         cli.tag.as_deref().unwrap_or(""),
-                        task_name
+                        escape(&task_name)
                     );
                     return Ok(());
                 }
@@ -753,7 +781,7 @@ fn handle_command_dispatch(
                 if cli.verbose && !config_in_worktree {
                     eprintln!(
                         "Using config from primary checkout: {}",
-                        config_path.display()
+                        escape_path(&config_path)
                     );
                 }
 
@@ -811,7 +839,7 @@ fn handle_command_dispatch(
                 eprintln!(
                     "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
                     "warning:".yellow().bold(),
-                    task_name
+                    escape(&task_name)
                 );
             }
 
@@ -849,7 +877,7 @@ fn handle_command_dispatch(
                 .map(|p| p.to_string_lossy().to_string())
                 .unwrap_or_else(|| ".meta / .meta.yaml / .meta.yml".to_string());
             eprintln!("Error: Could not find meta config file '{config_name}'");
-            eprintln!("Searched from {} up to root", current_dir.display());
+            eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
         }
     };
@@ -858,7 +886,7 @@ fn handle_command_dispatch(
 
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
-        println!("Resolved config file path: {}", absolute_path.display());
+        println!("Resolved config file path: {}", escape_path(&absolute_path));
         println!("Executing command: {command_str}");
     }
 
@@ -898,7 +926,7 @@ fn handle_command_dispatch(
         // The walk reads the default config file; with --config, start from
         // the chosen one and walk only the nested meta repos
         tree = match cli.config {
-            Some(_) => walk_from(meta_dir, &meta_projects, depth),
+            Some(_) => config::walk_projects(meta_dir, &meta_projects, depth)?,
             None => config::walk_meta_tree(meta_dir, depth)?,
         };
         project_paths = vec![meta_dir_str.clone()];
@@ -1020,15 +1048,17 @@ fn handle_plugin_command(
             if json {
                 println!("{}", serde_json::to_string_pretty(&results)?);
             } else if results.is_empty() {
-                println!("No plugins found matching '{query}'");
+                println!("No plugins found matching '{}'", escape(&query));
             } else {
                 println!("Found {} plugin(s):", results.len());
                 for plugin in results {
                     println!(
                         "  {} v{} - {}",
-                        plugin.name, plugin.version, plugin.description
+                        escape(&plugin.name),
+                        escape(&plugin.version),
+                        escape(&plugin.description)
                     );
-                    println!("    by {}", plugin.author);
+                    println!("    by {}", escape(&plugin.author));
                 }
             }
         }
@@ -1049,13 +1079,19 @@ fn handle_plugin_command(
                 // Direct URL install
                 let plugin_name = installer.install_from_url(&name)?;
                 if !json {
-                    println!("Successfully installed {plugin_name} to {location}");
+                    println!(
+                        "Successfully installed {} to {location}",
+                        escape(&plugin_name)
+                    );
                 }
             } else if let Some(shorthand) = GitHubShorthand::parse(&name) {
                 // GitHub shorthand install (user/repo[@version])
                 let plugin_name = installer.install_from_github(&shorthand)?;
                 if !json {
-                    println!("Successfully installed {plugin_name} to {location}");
+                    println!(
+                        "Successfully installed {} to {location}",
+                        escape(&plugin_name)
+                    );
                 }
             } else {
                 // Registry-based install
@@ -1069,11 +1105,13 @@ fn handle_plugin_command(
                             let plugin_name = installer.install_from_github(&shorthand)?;
                             if !json {
                                 println!(
-                                    "Successfully installed {plugin_name} from {source} to {location}"
+                                    "Successfully installed {} from {} to {location}",
+                                    escape(&plugin_name),
+                                    escape(&source)
                                 );
                             }
                         } else {
-                            anyhow::bail!("Invalid plugin source in registry: {}", source);
+                            anyhow::bail!("Invalid plugin source in registry: {}", escape(&source));
                         }
                     }
                     Err(_) => {
@@ -1084,9 +1122,9 @@ fn handle_plugin_command(
                         if !json {
                             println!(
                                 "Successfully installed {} v{} ({}) to {location}",
-                                metadata.name,
-                                metadata.version,
-                                installed.join(", ")
+                                escape(&metadata.name),
+                                escape(&metadata.version),
+                                escape(&installed.join(", "))
                             );
                         }
                     }
@@ -1128,7 +1166,12 @@ fn handle_plugin_command(
                         // For local plugins, show the path in the local plugins dir
                         let cwd = std::env::current_dir()?;
                         let path = cwd.join(".meta/plugins").join(&plugin.name);
-                        println!("{:<12} {:<12} {}", name, version, path.display());
+                        println!(
+                            "{:<12} {:<12} {}",
+                            escape(name),
+                            escape(version),
+                            escape_path(&path)
+                        );
                     }
                 }
             } else {
@@ -1156,7 +1199,12 @@ fn handle_plugin_command(
                     println!("{:<12} {:<12} PATH", "NAME", "VERSION");
                     println!("{}", "-".repeat(70));
                     for (name, version, _, path) in &plugins {
-                        println!("{:<12} {:<12} {}", name, version, path.display());
+                        println!(
+                            "{:<12} {:<12} {}",
+                            escape(name),
+                            escape(version),
+                            escape_path(path)
+                        );
                     }
                 }
             }
@@ -1193,7 +1241,9 @@ fn handle_plugin_command(
                             if !json {
                                 println!(
                                     "Update available for {}: {} → {}",
-                                    plugin_name, current, latest
+                                    escape(&plugin_name),
+                                    escape(&current),
+                                    escape(&latest)
                                 );
                             }
                         } else {
@@ -1201,14 +1251,17 @@ fn handle_plugin_command(
                             if !json {
                                 println!(
                                     "Successfully updated {} from {} to {} in {}",
-                                    updated, current, latest, location
+                                    escape(&updated),
+                                    escape(&current),
+                                    escape(&latest),
+                                    escape(location)
                                 );
                             }
                         }
                     }
                     None => {
                         if !json {
-                            println!("{} is already up to date", plugin_name);
+                            println!("{} is already up to date", escape(&plugin_name));
                         }
                     }
                 }
@@ -1236,7 +1289,12 @@ fn handle_plugin_command(
                     if !json {
                         println!("Updates available:");
                         for (name, current, latest) in &updates_available {
-                            println!("  {} {} → {}", name, current, latest);
+                            println!(
+                                "  {} {} → {}",
+                                escape(name),
+                                escape(current),
+                                escape(latest)
+                            );
                         }
                     }
                 } else {
@@ -1244,19 +1302,32 @@ fn handle_plugin_command(
                         match installer.update_plugin(name) {
                             Ok(_) => {
                                 if !json {
-                                    println!("Updated {} from {} to {}", name, current, latest);
+                                    println!(
+                                        "Updated {} from {} to {}",
+                                        escape(name),
+                                        escape(current),
+                                        escape(latest)
+                                    );
                                 }
                                 updated_count += 1;
                             }
                             Err(e) => {
                                 if !json {
-                                    eprintln!("Failed to update {}: {}", name, e);
+                                    eprintln!(
+                                        "Failed to update {}: {}",
+                                        escape(name),
+                                        escape_lines(&format!("{e:#}"))
+                                    );
                                 }
                             }
                         }
                     }
                     if !json {
-                        println!("\nUpdated {} plugin(s) in {}", updated_count, location);
+                        println!(
+                            "\nUpdated {} plugin(s) in {}",
+                            updated_count,
+                            escape(location)
+                        );
                     }
                 }
             }
@@ -1385,8 +1456,8 @@ fn check_and_warn_orphan() {
             "{}: This meta repo is not tracked by its parent.",
             "warning".yellow().bold()
         );
-        eprintln!("  Current: {}", warning.current.display());
-        eprintln!("  Parent:  {}", warning.parent.display());
+        eprintln!("  Current: {}", escape_path(&warning.current));
+        eprintln!("  Parent:  {}", escape_path(&warning.parent));
         eprintln!();
 
         // Show format-appropriate syntax
@@ -1396,71 +1467,24 @@ fn check_and_warn_orphan() {
         };
         eprintln!(
             "  To include it, add to {}/{}:",
-            warning.parent.display(),
+            escape_path(&warning.parent),
             config_file
         );
         match warning.parent_format {
             ConfigFormat::Json => {
                 eprintln!(
                     "    \"{}\": {{ \"repo\": \"<git-url>\", \"meta\": true }}",
-                    warning.suggested_key
+                    escape(&warning.suggested_key)
                 );
             }
             ConfigFormat::Yaml => {
-                eprintln!("    {}:", warning.suggested_key);
+                eprintln!("    {}:", escape(&warning.suggested_key));
                 eprintln!("      repo: <git-url>");
                 eprintln!("      meta: true");
             }
         }
         eprintln!();
     }
-}
-
-/// The meta tree whose top level is `projects` (from the config the user
-/// chose), walked the way `walk_meta_tree` walks the default config: nested
-/// meta repos `depth` levels down, each directory expanded at most once.
-fn walk_from(
-    meta_dir: &std::path::Path,
-    projects: &[ProjectInfo],
-    depth: Option<usize>,
-) -> Vec<MetaTreeNode> {
-    fn walk(
-        dir: &std::path::Path,
-        projects: &[ProjectInfo],
-        depth: Option<usize>,
-        visited: &mut std::collections::HashSet<PathBuf>,
-    ) -> Vec<MetaTreeNode> {
-        let mut nodes: Vec<MetaTreeNode> = projects
-            .iter()
-            .map(|project| {
-                let project_dir = dir.join(&project.path);
-                let config = find_meta_config(&project_dir, None).filter(|(path, _)| {
-                    project_dir.is_dir() && path.parent() == Some(&project_dir)
-                });
-                let canonical = project_dir.canonicalize().unwrap_or(project_dir.clone());
-                let children = match &config {
-                    Some((path, _)) if depth != Some(0) && visited.insert(canonical) => {
-                        parse_meta_config(path)
-                            .map(|(nested, _)| {
-                                let depth = depth.map(|d| d.saturating_sub(1));
-                                walk(&project_dir, &nested, depth, visited)
-                            })
-                            .unwrap_or_default()
-                    }
-                    _ => vec![],
-                };
-                MetaTreeNode {
-                    info: project.clone(),
-                    is_meta: config.is_some(),
-                    children,
-                }
-            })
-            .collect();
-        nodes.sort_by(|a, b| a.info.name.cmp(&b.info.name));
-        nodes
-    }
-    let root = meta_dir.canonicalize().unwrap_or(meta_dir.to_path_buf());
-    walk(meta_dir, projects, depth, &mut [root].into_iter().collect())
 }
 
 /// Flatten a meta tree into path strings, optionally filtering by tag.
@@ -1559,7 +1583,7 @@ mod tests {
 
         let api = &projects[0];
         assert_eq!(api.name, "api");
-        assert_eq!(api.path, "./services/api");
+        assert_eq!(api.path, "services/api"); // normalized
         assert_eq!(api.repo.as_ref().unwrap(), "git@github.com:org/api.git");
         assert_eq!(api.tags, vec!["backend", "rust"]);
     }
@@ -1622,7 +1646,7 @@ ignore:
         );
 
         let api = projects.iter().find(|p| p.name == "api").unwrap();
-        assert_eq!(api.path, "./backend/api");
+        assert_eq!(api.path, "backend/api"); // normalized
         assert_eq!(api.tags, vec!["backend", "python"]);
 
         assert_eq!(ignore, vec!["node_modules", "__pycache__"]);

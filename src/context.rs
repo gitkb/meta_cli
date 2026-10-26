@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime};
 use crate::dependency_graph::DependencyGraph;
 use crate::git_utils;
 use meta_core::config::{self, ProjectInfo};
+use meta_core::display::{escape, escape_path};
 
 // ── Cache ───────────────────────────────────────────────
 
@@ -26,33 +27,26 @@ struct CachedContext {
     workspace_root: PathBuf,
 }
 
-fn cache_path() -> PathBuf {
+fn cache_path() -> anyhow::Result<PathBuf> {
     meta_core::data_dir::data_file("context_cache")
 }
 
 fn load_cache() -> Option<CachedContext> {
-    let path = cache_path();
-    let content = std::fs::read(&path).ok()?;
-    serde_json::from_slice(&content).ok()
+    // checked like any store: it is rendered into what agents read
+    meta_core::store::read::<Option<CachedContext>>(&cache_path().ok()?)
+        .ok()
+        .flatten()
 }
 
 fn save_cache(cached: &CachedContext, verbose: bool) {
-    let path = cache_path();
-    match serde_json::to_vec(cached) {
-        Ok(json) => {
-            if let Err(e) = std::fs::write(&path, json) {
-                if verbose {
-                    eprintln!("Failed to write context cache: {e}");
-                }
-            } else if verbose {
-                eprintln!("Saved context cache to {}", path.display());
-            }
-        }
-        Err(e) => {
-            if verbose {
-                eprintln!("Failed to serialize context cache: {e}");
-            }
-        }
+    let Ok(path) = cache_path() else {
+        return;
+    };
+    match meta_core::store::write_atomic(&path, cached) {
+        Ok(()) if verbose => eprintln!("Saved context cache to {}", escape_path(&path)),
+        Ok(()) => {}
+        Err(e) if verbose => eprintln!("Failed to write context cache: {e:#}"),
+        Err(_) => {}
     }
 }
 
@@ -147,7 +141,7 @@ pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool
         eprintln!(
             "Found {} projects in {}",
             projects.len(),
-            config_path.display()
+            escape_path(&config_path)
         );
     }
 
@@ -315,15 +309,27 @@ fn build_dependency_map(projects: &[ProjectInfo]) -> Option<HashMap<String, Vec<
 
 // ── Markdown Formatting ─────────────────────────────────
 
+/// Text from `.meta`, git or the filesystem, made safe for this markdown,
+/// which agents read: control characters escaped, then `\` and `|` escaped
+/// so the value stays in its table cell.
+fn md(s: &str) -> String {
+    escape(s).replace('\\', "\\\\").replace('|', "\\|")
+}
+
+fn md_list(items: &[String]) -> String {
+    items.iter().map(|s| md(s)).collect::<Vec<_>>().join(", ")
+}
+
 pub fn format_markdown(ctx: &WorkspaceContext) -> String {
     let mut out = String::new();
 
     // Header
     out.push_str(&format!(
         "# Meta Workspace: {} ({} repos)\n\n",
-        ctx.name, ctx.repo_count
+        md(&ctx.name),
+        ctx.repo_count
     ));
-    out.push_str(&ctx.description);
+    out.push_str(&md(&ctx.description));
     out.push_str("\n\n");
 
     // Repo table
@@ -337,10 +343,10 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
         for r in &ctx.repos {
             out.push_str(&format!(
                 "| {} | {} | {} | {} |\n",
-                r.name,
-                r.branch.as_deref().unwrap_or("-"),
+                md(&r.name),
+                md(r.branch.as_deref().unwrap_or("-")),
                 format_status(r),
-                r.tags.join(", "),
+                md_list(&r.tags),
             ));
         }
     } else if has_status {
@@ -350,8 +356,8 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
         for r in &ctx.repos {
             out.push_str(&format!(
                 "| {} | {} | {} |\n",
-                r.name,
-                r.branch.as_deref().unwrap_or("-"),
+                md(&r.name),
+                md(r.branch.as_deref().unwrap_or("-")),
                 format_status(r),
             ));
         }
@@ -361,11 +367,11 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
             out.push_str("| Repo | Tags |\n");
             out.push_str("|------|------|\n");
             for r in &ctx.repos {
-                out.push_str(&format!("| {} | {} |\n", r.name, r.tags.join(", ")));
+                out.push_str(&format!("| {} | {} |\n", md(&r.name), md_list(&r.tags)));
             }
         } else {
             for r in &ctx.repos {
-                out.push_str(&format!("- {}\n", r.name));
+                out.push_str(&format!("- {}\n", md(&r.name)));
             }
         }
     }
@@ -373,7 +379,11 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
     // Key commands
     out.push_str("\n## Key Commands\n");
     for cmd in &ctx.commands {
-        out.push_str(&format!("- `{}` — {}\n", cmd.command, cmd.description));
+        out.push_str(&format!(
+            "- `{}` — {}\n",
+            md(&cmd.command),
+            md(&cmd.description)
+        ));
     }
 
     // Dependencies
@@ -383,7 +393,7 @@ pub fn format_markdown(ctx: &WorkspaceContext) -> String {
         sorted_keys.sort();
         for key in sorted_keys {
             let targets = &deps[key];
-            out.push_str(&format!("{} → {}\n", key, targets.join(", ")));
+            out.push_str(&format!("{} → {}\n", md(key), md_list(targets)));
         }
     }
 
@@ -445,6 +455,39 @@ mod tests {
             behind: None,
             tags: tags.into_iter().map(|s| s.to_string()).collect(),
         }
+    }
+
+    #[test]
+    fn markdown_escapes_untrusted_values() {
+        // Values from git, the filesystem or an old context cache can carry
+        // terminal escapes or break the table that agents read.
+        let mut ctx = make_ctx(
+            vec![make_repo(
+                "z\u{1b}[2J",
+                Some("evil|branch\\|x\u{1b}]52;c;cm0K\u{7}"),
+                Some(false),
+                Some(0),
+                vec!["n\nfake"],
+            )],
+            Some(HashMap::from([(
+                "a\u{1b}[1A".to_string(),
+                vec!["b\nc".to_string()],
+            )])),
+        );
+        ctx.name = "ws\u{1b}]0;TITLE\u{7}".to_string();
+        let md = format_markdown(&ctx);
+        assert!(!md.contains('\u{1b}') && !md.contains('\u{7}'), "{md}");
+        assert!(
+            md.contains(
+                "| z\\\\u{1b}[2J | evil\\|branch\\\\\\|x\\\\u{1b}]52;c;cm0K\\\\u{7} | clean | n\\\\nfake |"
+            ),
+            "{md}"
+        );
+        assert!(
+            md.contains("# Meta Workspace: ws\\\\u{1b}]0;TITLE\\\\u{7} (1 repos)"),
+            "{md}"
+        );
+        assert!(md.contains("a\\\\u{1b}[1A → b\\\\nc"), "{md}");
     }
 
     // ── format_status ──────────────────────────────────

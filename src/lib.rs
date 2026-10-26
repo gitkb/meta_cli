@@ -1,4 +1,5 @@
 pub mod config;
+pub use meta_core::display;
 pub mod context;
 pub mod dependency_graph;
 pub mod git_utils;

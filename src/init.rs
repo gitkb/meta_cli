@@ -7,6 +7,7 @@
 use crate::config;
 use anyhow::{Context, Result};
 use colored::*;
+use meta_core::display::escape_path;
 use serde_json::{json, Map, Value};
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -178,7 +179,8 @@ fn install_claude_integration_to(
     let skills_dir = claude_dir.join("skills");
     let rules_dir = claude_dir.join("rules");
 
-    if config::find_meta_config_in(target_dir).is_none() {
+    // A config that can't be read is an error, not "no config"
+    if config::find_meta_config_in(target_dir)?.is_none() {
         println!(
             "{}",
             "Warning: No .meta config found in current directory.".yellow()
@@ -206,7 +208,7 @@ fn install_claude_integration_to(
     let rules_link = symlink_in(target_dir, Path::new(".claude/rules"));
     if rules_link.is_none() {
         fs::create_dir_all(&rules_dir)
-            .with_context(|| format!("Failed to create {}", rules_dir.display()))?;
+            .with_context(|| format!("Failed to create {}", escape_path(&rules_dir)))?;
     }
 
     // Older releases wrote flat `<name>.md` files, which Claude Code does not load.
@@ -229,14 +231,14 @@ fn install_claude_integration_to(
             println!(
                 "{} {} (not created by meta, left alone)",
                 "Skipped".yellow(),
-                flat_path.display()
+                escape_path(&flat_path)
             );
             skipped += 1;
         } else if overwrite_content && shipped {
             fs::remove_file(&flat_path)
-                .with_context(|| format!("Failed to remove {}", flat_path.display()))?;
+                .with_context(|| format!("Failed to remove {}", escape_path(&flat_path)))?;
             if verbose {
-                println!("{} {}", "Removed".yellow(), flat_path.display());
+                println!("{} {}", "Removed".yellow(), escape_path(&flat_path));
             }
         }
     }
@@ -250,8 +252,8 @@ fn install_claude_integration_to(
             println!(
                 "{} {} (reached through the symlink {}, not followed)",
                 "Skipped".yellow(),
-                rel.display(),
-                link.display()
+                escape_path(&rel),
+                escape_path(&link)
             );
             skipped += 1;
             continue;
@@ -286,7 +288,7 @@ fn install_claude_integration_to(
         println!(
             "{} .claude/settings.json (reached through the symlink {}, not followed)",
             "Skipped".yellow(),
-            link.display()
+            escape_path(&link)
         );
         skipped += 1;
     } else {
@@ -448,19 +450,26 @@ fn install_skills_with(
     for (name, content) in skills {
         let rel = tool_dir.join(name).join("SKILL.md");
         if let Some(link) = symlink_in(root, &rel) {
-            anyhow::bail!("Refusing to write through the symlink {}", link.display());
+            anyhow::bail!(
+                "Refusing to write through the symlink {}",
+                escape_path(&link)
+            );
         }
         let path = root.join(&rel);
         if path.exists() && !overwrite {
             if verbose {
-                println!("{} {} (already exists)", "Skipped".yellow(), path.display());
+                println!(
+                    "{} {} (already exists)",
+                    "Skipped".yellow(),
+                    escape_path(&path)
+                );
             }
             report.skipped += 1;
             continue;
         }
         let skill_dir = root.join(tool_dir.join(name));
         fs::create_dir_all(&skill_dir)
-            .with_context(|| format!("Failed to create {}", skill_dir.display()))?;
+            .with_context(|| format!("Failed to create {}", escape_path(&skill_dir)))?;
         write_file(&path, content, verbose)?;
         report.written += 1;
     }
@@ -475,15 +484,15 @@ fn install_skills_with(
             println!(
                 "{} {} (reached through the symlink {}, not followed)",
                 "Skipped".yellow(),
-                agent_dir.display(),
-                link.display()
+                escape_path(agent_dir),
+                escape_path(&link)
             );
             report.skipped += 1;
             continue;
         }
         let skills_dir = root.join(agent_dir);
         fs::create_dir_all(&skills_dir)
-            .with_context(|| format!("Failed to create {}", skills_dir.display()))?;
+            .with_context(|| format!("Failed to create {}", escape_path(&skills_dir)))?;
         report.agent_dirs.push(agent_dir.display().to_string());
 
         // One `..` per folder in `agent_dir`
@@ -498,7 +507,11 @@ fn install_skills_with(
                 SkillEntry::Owned if overwrite => remove_owned(&link, &marker)?,
                 SkillEntry::Owned => {
                     if verbose {
-                        println!("{} {} (already exists)", "Skipped".yellow(), link.display());
+                        println!(
+                            "{} {} (already exists)",
+                            "Skipped".yellow(),
+                            escape_path(&link)
+                        );
                     }
                     report.skipped += 1;
                     continue;
@@ -507,7 +520,7 @@ fn install_skills_with(
                     println!(
                         "{} {} (not created by {tool}, left alone)",
                         "Skipped".yellow(),
-                        link.display()
+                        escape_path(&link)
                     );
                     report.skipped += 1;
                     continue;
@@ -519,8 +532,8 @@ fn install_skills_with(
                         println!(
                             "{} {} -> {}",
                             "Linked".green(),
-                            link.display(),
-                            target.display()
+                            escape_path(&link),
+                            escape_path(&target)
                         );
                     }
                 }
@@ -532,7 +545,7 @@ fn install_skills_with(
                     println!(
                         "{} {} (symlink failed: {err})",
                         "Copied".yellow(),
-                        link.display()
+                        escape_path(&link)
                     );
                     report.copied += 1;
                 }
@@ -602,30 +615,30 @@ fn skill_entry(link: &Path, target: &Path, marker: &str, legacy: Option<&str>) -
 fn remove_owned(link: &Path, marker: &str) -> Result<()> {
     if fs::symlink_metadata(link).is_ok_and(|m| m.is_file()) {
         return fs::remove_file(link)
-            .with_context(|| format!("Failed to remove {}", link.display()));
+            .with_context(|| format!("Failed to remove {}", escape_path(link)));
     }
     for file in ["SKILL.md", marker] {
         let path = link.join(file);
         if path.exists() {
             fs::remove_file(&path)
-                .with_context(|| format!("Failed to remove {}", path.display()))?;
+                .with_context(|| format!("Failed to remove {}", escape_path(&path)))?;
         }
     }
-    fs::remove_dir(link).with_context(|| format!("Failed to remove {}", link.display()))
+    fs::remove_dir(link).with_context(|| format!("Failed to remove {}", escape_path(link)))
 }
 
 /// Copy the skill folder of `source` (a `SKILL.md`) to `dir` where it can't be linked,
 /// marking the copy as the tool's own.
 fn copy_skill(source: &Path, dir: &Path, marker: &str) -> Result<()> {
-    fs::create_dir(dir).with_context(|| format!("Failed to create {}", dir.display()))?;
+    fs::create_dir(dir).with_context(|| format!("Failed to create {}", escape_path(dir)))?;
     fs::copy(source, dir.join("SKILL.md"))
-        .with_context(|| format!("Failed to copy {}", source.display()))?;
+        .with_context(|| format!("Failed to copy {}", escape_path(source)))?;
     fs::write(
         dir.join(marker),
         "Copied by `meta init claude` because a symlink could not be created here.\n\
          `meta init claude --update` refreshes it.\n",
     )
-    .with_context(|| format!("Failed to write {}", dir.display()))?;
+    .with_context(|| format!("Failed to write {}", escape_path(dir)))?;
     Ok(())
 }
 
@@ -658,18 +671,22 @@ fn install_settings(settings_path: &Path, force: bool, verbose: bool) -> Result<
 
     // Merge: read existing, deep-merge hooks, write back
     let existing_content = fs::read_to_string(settings_path)
-        .with_context(|| format!("Failed to read {}", settings_path.display()))?;
+        .with_context(|| format!("Failed to read {}", escape_path(settings_path)))?;
 
     let existing: Value = serde_json::from_str(&existing_content)
-        .with_context(|| format!("Failed to parse {}", settings_path.display()))?;
+        .with_context(|| format!("Failed to parse {}", escape_path(settings_path)))?;
 
     let merged = merge_hooks_into_settings(existing, meta_hooks);
     let content = serde_json::to_string_pretty(&merged)?;
     fs::write(settings_path, &content)
-        .with_context(|| format!("Failed to write {}", settings_path.display()))?;
+        .with_context(|| format!("Failed to write {}", escape_path(settings_path)))?;
 
     if verbose {
-        println!("{} {} (merged)", "Wrote".green(), settings_path.display());
+        println!(
+            "{} {} (merged)",
+            "Wrote".green(),
+            escape_path(settings_path)
+        );
     } else {
         println!("  {} settings.json (merged)", "✓".green());
     }
@@ -852,15 +869,15 @@ fn register_marketplace(verbose: bool) {
 }
 
 fn write_file(path: &Path, content: &str, verbose: bool) -> Result<()> {
-    fs::write(path, content).with_context(|| format!("Failed to write {}", path.display()))?;
+    fs::write(path, content).with_context(|| format!("Failed to write {}", escape_path(path)))?;
 
     if verbose {
-        println!("{} {}", "Wrote".green(), path.display());
+        println!("{} {}", "Wrote".green(), escape_path(path));
     } else {
         // Show the parent too: every skill file is named SKILL.md.
         let name = |p: &Path| p.file_name().unwrap_or_default().to_owned();
         let shown = Path::new(&path.parent().map(name).unwrap_or_default()).join(name(path));
-        println!("  {} {}", "✓".green(), shown.display());
+        println!("  {} {}", "✓".green(), escape_path(&shown));
     }
 
     Ok(())

@@ -4,6 +4,7 @@
 //! This approach provides better isolation, language flexibility, and simpler debugging.
 
 use anyhow::{Context, Result};
+use meta_core::display::{escape, escape_lines, escape_path};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,18 +46,60 @@ impl SubprocessPluginManager {
     ///
     /// Discovery order (first match wins):
     /// 1. `.meta/plugins/` directories walking up from cwd (project-local)
+    ///
+    /// A plugin directory that another user owns or could write to is
+    /// skipped with a warning (see `meta_core::data_dir::check_private_dir`).
     /// 2. `~/.meta/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
+        // Plugin dirs refused below, resolved: a PATH entry may lead into one
+        let mut refused = std::collections::HashSet::new();
+
+        // ~/.meta/plugins/, when it exists, is refused if another user could
+        // write to it. The walk up from cwd passes through it from anywhere
+        // under $HOME, so a refused one is marked visited to keep that walk
+        // from running what it holds. No home, or no plugins dir, just means
+        // no global plugins.
+        let global_plugins = meta_core::meta_dir()
+            .ok()
+            .map(|dir| dir.join("plugins"))
+            .filter(|dir| dir.is_dir())
+            .filter(|dir| match meta_core::data_dir::check_private_dir(dir) {
+                Ok(()) => true,
+                Err(e) => {
+                    eprintln!(
+                        "warning: skipping global plugins: {}",
+                        escape_lines(&format!("{e:#}"))
+                    );
+                    let resolved = dir.canonicalize().unwrap_or(dir.clone());
+                    visited.insert(resolved.clone());
+                    refused.insert(resolved);
+                    false
+                }
+            });
 
         // Search in .meta/plugins/ directories walking up from cwd (project-local)
         let mut current_dir = std::env::current_dir()?;
         loop {
             let plugin_dir = current_dir.join(".meta").join("plugins");
-            if plugin_dir.exists() && plugin_dir.is_dir() && visited.insert(plugin_dir.clone()) {
-                self.scan_directory(&plugin_dir)?;
+            if plugin_dir.is_dir()
+                && visited.insert(plugin_dir.canonicalize().unwrap_or(plugin_dir.clone()))
+            {
+                // Plugins are run, so one that another user could have put
+                // there is skipped
+                match meta_core::data_dir::check_private_dir(&plugin_dir) {
+                    Ok(()) => self.scan_directory(&plugin_dir, &mut refused)?,
+                    Err(e) => {
+                        eprintln!(
+                            "warning: skipping plugins in {}: {}",
+                            escape_path(&plugin_dir),
+                            escape_lines(&format!("{e:#}"))
+                        );
+                        refused.insert(plugin_dir.canonicalize().unwrap_or(plugin_dir.clone()));
+                    }
+                }
             }
             if let Some(parent) = current_dir.parent() {
                 current_dir = parent.to_path_buf();
@@ -66,17 +109,25 @@ impl SubprocessPluginManager {
         }
 
         // Search in ~/.meta/plugins/ (global installed)
-        if let Ok(global_plugins) = meta_core::data_dir::data_subdir("plugins") {
-            if global_plugins.exists() && visited.insert(global_plugins.clone()) {
-                self.scan_directory(&global_plugins)?;
+        if let Some(global_plugins) = global_plugins {
+            if visited.insert(
+                global_plugins
+                    .canonicalize()
+                    .unwrap_or(global_plugins.clone()),
+            ) {
+                self.scan_directory(&global_plugins, &mut refused)?;
             }
         }
 
         // Search in PATH for meta-* executables (bundled/system)
         if let Ok(path_var) = std::env::var("PATH") {
             for path_dir in std::env::split_paths(&path_var) {
-                if path_dir.exists() && visited.insert(path_dir.clone()) {
-                    self.scan_path_directory(&path_dir)?;
+                // Compared resolved, like the plugin dirs above: a PATH entry
+                // that links to a refused plugin dir must not bring it back
+                if path_dir.exists()
+                    && visited.insert(path_dir.canonicalize().unwrap_or(path_dir.clone()))
+                {
+                    self.scan_path_directory(&path_dir, &refused)?;
                 }
             }
         }
@@ -85,9 +136,13 @@ impl SubprocessPluginManager {
     }
 
     /// Scan a .meta-plugins directory for plugin executables
-    fn scan_directory(&mut self, dir: &Path) -> Result<()> {
+    fn scan_directory(
+        &mut self,
+        dir: &Path,
+        refused: &mut std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
         if self.verbose {
-            println!("Scanning for subprocess plugins in: {}", dir.display());
+            println!("Scanning for subprocess plugins in: {}", escape_path(dir));
         }
 
         for entry in std::fs::read_dir(dir)? {
@@ -100,22 +155,48 @@ impl SubprocessPluginManager {
                     && !name.ends_with(".dylib")
                     && !name.ends_with(".so")
                     && !name.ends_with(".dll")
+                    && is_executable(&path)
                 {
-                    self.try_load_plugin(&path)?;
+                    // It is run: skip it if another user could have changed it
+                    match meta_core::data_dir::check_trusted_file(&path) {
+                        Ok(()) => self.try_load_plugin(&path)?,
+                        Err(e) => {
+                            eprintln!(
+                                "warning: skipping plugin {}: {}",
+                                escape_path(&path),
+                                escape_lines(&format!("{e:#}"))
+                            );
+                            refused.insert(path.canonicalize().unwrap_or(path.clone()));
+                        }
+                    }
                 }
             }
         }
         Ok(())
     }
 
-    /// Scan a PATH directory for meta-* executables
-    fn scan_path_directory(&mut self, dir: &Path) -> Result<()> {
+    /// Scan a PATH directory for meta-* executables. PATH is the user's own
+    /// choice (it is where meta and git come from too), so only a program
+    /// that leads into a plugin dir or file refused above, through any of
+    /// its links, is skipped.
+    fn scan_path_directory(
+        &mut self,
+        dir: &Path,
+        refused: &std::collections::HashSet<PathBuf>,
+    ) -> Result<()> {
         if let Ok(entries) = std::fs::read_dir(dir) {
             for entry in entries.flatten() {
                 let path = entry.path();
                 if let Some(name) = path.file_name().and_then(|n| n.to_str()) {
                     if name.starts_with("meta-") && is_executable(&path) {
-                        self.try_load_plugin(&path)?;
+                        if leads_into_refused(&path, refused) {
+                            eprintln!(
+                                "warning: skipping plugin {}: it links into a refused plugin directory",
+                                escape_path(&path)
+                            );
+                        } else {
+                            self.try_load_plugin(&path)?;
+                        }
                     }
                 }
             }
@@ -148,9 +229,9 @@ impl SubprocessPluginManager {
                 if self.verbose {
                     println!(
                         "  Found plugin: {} v{} ({})",
-                        info.name,
-                        info.version,
-                        path.display()
+                        escape(&info.name),
+                        escape(&info.version),
+                        escape_path(path)
                     );
                 }
 
@@ -259,7 +340,7 @@ impl SubprocessPluginManager {
             .stdout(Stdio::piped()) // Capture stdout to parse response
             .stderr(Stdio::inherit()) // Let stderr pass through for error messages
             .spawn()
-            .with_context(|| format!("Failed to execute plugin {}", plugin.path.display()))?;
+            .with_context(|| format!("Failed to execute plugin {}", escape_path(&plugin.path)))?;
 
         // Send request to plugin's stdin
         if let Some(mut stdin) = child.stdin.take() {
@@ -270,7 +351,10 @@ impl SubprocessPluginManager {
         let output = child.wait_with_output()?;
 
         if !output.status.success() {
-            // Plugin already printed its error to stderr, just propagate the exit code
+            // Plugin already printed its error to stderr. What it printed
+            // before failing (say the worktrees it removed before a store
+            // error) is shown too; then its exit code is propagated.
+            print!("{}", String::from_utf8_lossy(&output.stdout));
             std::process::exit(output.status.code().unwrap_or(1));
         }
 
@@ -642,6 +726,72 @@ impl SubprocessPluginManager {
 }
 
 /// Check if a file is executable
+/// Whether running `path` would pass through a refused plugin dir or file.
+/// The path is resolved one component at a time, following each symlink
+/// where it is met (a directory link as well as the program's own), and
+/// every location on the way is checked: one at or below a refused dir, or
+/// a refused file, counts. More than 40 links count as well.
+fn leads_into_refused(path: &Path, refused: &std::collections::HashSet<PathBuf>) -> bool {
+    use std::path::Component;
+    // A location as canonicalize writes it (refused entries are written so),
+    // without resolving a link at its last component
+    let located = |at: &Path| match (at.parent(), at.file_name()) {
+        (Some(dir), Some(name)) => dir.canonicalize().ok().map(|dir| dir.join(name)),
+        _ => at.canonicalize().ok(),
+    };
+    let held = |at: &Path| located(at).is_some_and(|at| refused.iter().any(|r| at.starts_with(r)));
+    // From the absolute path, so a relative PATH entry's `..` is resolved
+    // against where it really leads
+    let absolute = match std::env::current_dir() {
+        Ok(cwd) => cwd.join(path),
+        Err(_) => return true,
+    };
+    let mut pending: std::collections::VecDeque<PathBuf> = absolute
+        .components()
+        .map(|c| PathBuf::from(c.as_os_str()))
+        .collect();
+    let mut current = PathBuf::new();
+    let mut links = 0;
+    while let Some(part) = pending.pop_front() {
+        match part.components().next() {
+            Some(Component::Prefix(_)) | Some(Component::RootDir) => current.push(&part),
+            Some(Component::CurDir) | None => {}
+            Some(Component::ParentDir) => {
+                current.pop();
+            }
+            Some(Component::Normal(name)) => {
+                let next = current.join(name);
+                if held(&next) {
+                    return true;
+                }
+                match std::fs::symlink_metadata(&next) {
+                    Ok(meta) if meta.file_type().is_symlink() => {
+                        links += 1;
+                        let Ok(target) = std::fs::read_link(&next) else {
+                            return true;
+                        };
+                        if links > 40 {
+                            return true;
+                        }
+                        // The target's parts go first; an absolute one
+                        // starts again from its root
+                        if target.has_root() {
+                            current = PathBuf::new();
+                        }
+                        for (k, c) in target.components().enumerate() {
+                            pending.insert(k, PathBuf::from(c.as_os_str()));
+                        }
+                    }
+                    Ok(_) => current = next,
+                    // Not there: nothing to run through it
+                    Err(_) => return false,
+                }
+            }
+        }
+    }
+    false
+}
+
 #[cfg(unix)]
 fn is_executable(path: &Path) -> bool {
     use std::os::unix::fs::PermissionsExt;
