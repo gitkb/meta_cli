@@ -783,9 +783,13 @@ fn handle_command_dispatch(
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
                 // A set lays its repos out as the workspace: a checkout's path
-                // in the set is its project's path
-                let project_map: std::collections::HashMap<&str, &ProjectInfo> =
-                    meta_projects.iter().map(|p| (p.path.as_str(), p)).collect();
+                // in the set is its project's path, nested meta repos included
+                let tree = config::walk_meta_tree(&task_dir, None).unwrap_or_default();
+                let project_map: std::collections::HashMap<String, ProjectInfo> =
+                    config::build_project_map(&tree, &task_dir, "")
+                        .into_iter()
+                        .map(|(place, (_, info))| (place, info))
+                        .collect();
 
                 // Filter the checkouts by their projects' tags
                 let wt_directories: Vec<String> = wt_paths
@@ -816,10 +820,7 @@ fn handle_command_dispatch(
 
                 // Selected by project name or by its path in the set
                 let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
-                    meta_projects
-                        .iter()
-                        .map(|p| (p.name.clone(), p.path.clone()))
-                        .collect()
+                    repo_filter::repo_names(&task_dir, &meta_projects, &tree)
                 })?;
 
                 if wt_directories.is_empty() {
