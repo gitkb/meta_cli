@@ -499,7 +499,9 @@ fn install_skills_with(
             match skill_entry(&link, &target, &marker, legacy) {
                 SkillEntry::Missing => {}
                 SkillEntry::Linked => {
-                    println!("Skipped {} (already linked)", escape_path(&link));
+                    if verbose {
+                        println!("Skipped {} (already linked)", escape_path(&link));
+                    }
                     continue;
                 }
                 SkillEntry::Owned if overwrite => remove_owned(&link, &marker)?,
@@ -673,6 +675,11 @@ fn prepare_settings(path: &Path) -> Result<SettingsPlan> {
 
 fn write_settings_atomic(path: &Path, content: &str) -> Result<()> {
     use std::io::Write;
+    // A new file has nothing to lose, and gets the umask's mode
+    if !path.exists() {
+        return fs::write(path, content)
+            .with_context(|| format!("Failed to write {}", escape_path(path)));
+    }
     let parent = path.parent().context("Settings path has no parent")?;
     let mut temp = tempfile::NamedTempFile::new_in(parent).with_context(|| {
         format!(
@@ -682,9 +689,8 @@ fn write_settings_atomic(path: &Path, content: &str) -> Result<()> {
     })?;
     temp.write_all(content.as_bytes())?;
     // The temporary file is private; keep the mode settings.json had
-    if let Ok(meta) = fs::metadata(path) {
-        temp.as_file().set_permissions(meta.permissions())?;
-    }
+    temp.as_file()
+        .set_permissions(fs::metadata(path)?.permissions())?;
     temp.persist(path)
         .with_context(|| format!("Failed to write {}", escape_path(path)))?;
     Ok(())

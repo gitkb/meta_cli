@@ -139,7 +139,16 @@ impl SubprocessPluginManager {
         // Project plugins: those of each meta directory from the nearest one
         // up to its workspace's root, nearest first, independently of --config
         let cwd = std::env::current_dir()?;
-        if let Some(nearest) = meta_core::config::nearest_meta_dir(&cwd)? {
+        // A config meta can't use leaves no project plugins; the command
+        // itself reports it, and `--help` still prints
+        let nearest = meta_core::config::nearest_meta_dir(&cwd).unwrap_or_else(|e| {
+            eprintln!(
+                "Warning: {}; skipping project plugins",
+                escape(&format!("{e:#}"))
+            );
+            None
+        });
+        if let Some(nearest) = nearest {
             for dir in meta_core::config::workspace_meta_dirs(&nearest) {
                 let plugin_dir = dir.join(".meta/plugins");
                 if visited.insert(resolved(&plugin_dir)) {

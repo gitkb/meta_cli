@@ -139,13 +139,14 @@ fn nested_meta_dir_reads_its_workspace_plugins_but_not_an_unlisting_parent() {
 }
 
 #[test]
-fn a_worktree_set_checkout_reads_its_own_and_its_main_checkouts_plugins() {
+fn a_worktree_set_checkout_reads_its_own_and_its_origins_plugins() {
     let f = Fixture::new(true);
     // A set's root checkout, laid out as git and meta leave it
     let admin = f.cwd.join(".git/worktrees/s1");
     fs::create_dir_all(&admin).unwrap();
     fs::write(admin.join("commondir"), "../..\n").unwrap();
-    fs::write(admin.join("meta-worktree.json"), "{}").unwrap();
+    let record = format!("{{\"project\": {:?}}}", f.cwd.display().to_string());
+    fs::write(admin.join("meta-worktree.json"), record).unwrap();
     let set = f.cwd.join(".worktrees/s1");
     fs::create_dir_all(&set).unwrap();
     fs::write(set.join(".meta.yaml"), "projects: {}\n").unwrap();
@@ -206,9 +207,13 @@ fn local_list_from_subdirectory_uses_real_path_and_binary_version() {
 fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
     let f = Fixture::new(true);
     fs::write(f.cwd.join(".meta.json"), "{}").unwrap();
-    for args in [vec!["--help"], vec!["plugin", "list", "--local"]] {
+    // Help still prints, with a warning; a command that needs the config fails
+    for (args, works) in [
+        (vec!["--help"], true),
+        (vec!["plugin", "list", "--local"], false),
+    ] {
         let output = f.run(&args);
-        assert!(!output.status.success());
+        assert_eq!(output.status.success(), works, "{args:?}");
         let err = String::from_utf8_lossy(&output.stderr);
         assert!(err.contains("Multiple meta config files"), "{err}");
         assert!(
