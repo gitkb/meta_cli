@@ -242,9 +242,14 @@ fn install_claude_integration_to(
             }
         } else if fs::symlink_metadata(&flat_path).is_ok() {
             println!(
-                "{} {} (left alone)",
+                "{} {} ({})",
                 "Skipped".yellow(),
-                escape_path(&flat_path)
+                escape_path(&flat_path),
+                if shipped {
+                    "an older meta's file; --force or --update removes it"
+                } else {
+                    "not created by meta, left alone"
+                }
             );
             skipped += 1;
         }

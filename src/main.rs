@@ -926,7 +926,7 @@ fn handle_command_dispatch(
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
         println!("Resolved config file path: {}", escape_path(&absolute_path));
-        println!("Executing command: {command_str}");
+        println!("Executing command: {}", escape(&command_str));
     }
 
     let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
@@ -1250,7 +1250,7 @@ fn handle_plugin_command(
             installer.uninstall(&name)?;
 
             if !json {
-                println!("Successfully uninstalled {name} from {location}");
+                println!("Successfully uninstalled {} from {location}", escape(&name));
             }
         }
         PluginCommands::Update { name, local, check } => {

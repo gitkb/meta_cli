@@ -18,10 +18,12 @@ struct Fixture {
 impl Fixture {
     fn new(workspace: bool) -> Self {
         let temp = tempfile::tempdir().unwrap();
-        let home = temp.path().join("home");
+        // meta reports resolved paths (macOS's temp dir is behind a link)
+        let base = temp.path().canonicalize().unwrap();
+        let home = base.join("home");
         let cwd = home.join("workspace");
-        let data = temp.path().join("data");
-        let bin = temp.path().join("bin");
+        let data = base.join("data");
+        let bin = base.join("bin");
         for dir in [&cwd, &data, &bin] {
             fs::create_dir_all(dir).unwrap();
         }
@@ -142,12 +144,16 @@ fn nested_meta_dir_reads_its_workspace_plugins_but_not_an_unlisting_parent() {
 fn a_worktree_set_checkout_reads_its_own_and_its_origins_plugins() {
     let f = Fixture::new(true);
     // A set's root checkout, laid out as git and meta leave it
+    let set = f.cwd.join(".worktrees/s1");
     let admin = f.cwd.join(".git/worktrees/s1");
     fs::create_dir_all(&admin).unwrap();
     fs::write(admin.join("commondir"), "../..\n").unwrap();
-    let record = format!("{{\"project\": {:?}}}", f.cwd.display().to_string());
+    let record = format!(
+        "{{\"project\": {:?}, \"set\": {:?}}}",
+        f.cwd.display().to_string(),
+        set.display().to_string()
+    );
     fs::write(admin.join("meta-worktree.json"), record).unwrap();
-    let set = f.cwd.join(".worktrees/s1");
     fs::create_dir_all(&set).unwrap();
     fs::write(set.join(".meta.yaml"), "projects: {}\n").unwrap();
     fs::write(set.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();

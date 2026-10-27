@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use log::{debug, info};
-use meta_core::display::escape_path;
+use meta_core::display::{escape, escape_path};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -327,7 +327,7 @@ impl RegistryClient {
             }
         }
 
-        anyhow::bail!("Plugin '{name}' not found in any registry")
+        anyhow::bail!("Plugin '{}' not found in any registry", escape(name))
     }
 
     /// Fetch plugin metadata (complex registry format)
@@ -347,7 +347,7 @@ impl RegistryClient {
             }
         }
 
-        anyhow::bail!("Plugin '{name}' not found in any registry")
+        anyhow::bail!("Plugin '{}' not found in any registry", escape(name))
     }
 
     /// Search for plugins matching a query
@@ -971,7 +971,7 @@ impl PluginInstaller {
             self.validate_plugin(&plugin_path).with_context(|| {
                 // Remove invalid plugin on failure
                 let _ = std::fs::remove_file(&plugin_path);
-                format!("Plugin validation failed for {plugin_name}")
+                format!("Plugin validation failed for {}", escape(plugin_name))
             })?;
         }
 
@@ -1145,7 +1145,7 @@ impl PluginInstaller {
             info!("Uninstalled {}", plugin_name);
             Ok(())
         } else {
-            anyhow::bail!("Plugin {plugin_name} is not installed")
+            anyhow::bail!("Plugin {} is not installed", escape(&plugin_name))
         }
     }
 

@@ -49,6 +49,8 @@ fn run_meta(root: &Path, args: &[&str]) -> std::process::Output {
         .args(args)
         .current_dir(root)
         .env("HOME", root)
+        .env("XDG_CONFIG_HOME", root.join("xdg"))
+        .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
         .env("META_DATA_DIR", root.join("data"))
         .env(
             "PATH",
