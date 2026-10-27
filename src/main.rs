@@ -461,16 +461,41 @@ fn print_plugin_update_help() {
 
 // === Main Entry Point ===
 
+/// Exit status for output cut off by a closed stdout, as a shell reports a
+/// command SIGPIPE stopped (128 + 13): a failure it hid isn't success.
+const CLOSED_STDOUT: u8 = 141;
+
+/// `println!` panics when stdout is a closed pipe (`meta … | head`). End
+/// quietly instead, as a fallible write to stdout does; other panics are
+/// reported as usual.
+fn exit_quietly_on_closed_stdout() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        // std's wording; "os error 232" is Windows' closed pipe
+        if message.starts_with("failed printing to stdout")
+            && (message.contains("Broken pipe") || message.contains("os error 232"))
+        {
+            std::process::exit(CLOSED_STDOUT.into());
+        }
+        report(info)
+    }));
+}
+
 fn main() -> std::process::ExitCode {
+    exit_quietly_on_closed_stdout();
     match run_cli() {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(e)
             if e.downcast_ref::<loop_lib::StdoutError>()
                 .is_some_and(|e| e.0.kind() == std::io::ErrorKind::BrokenPipe) =>
         {
-            // As a shell reports a command a closed pipe stopped (128 + SIGPIPE),
-            // so a failure it hid isn't reported as success
-            std::process::ExitCode::from(141)
+            std::process::ExitCode::from(CLOSED_STDOUT)
         }
         Err(e) => {
             // as Rust prints an error returned from main, but escaped: it can
