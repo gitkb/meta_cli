@@ -777,18 +777,29 @@ fn handle_command_dispatch(
                 );
             }
 
-            // Try to find .meta config for full feature support
-            if let Some((config_path, _format)) = find_meta_config(&task_dir, cli.config.as_ref())?
+            if let Some((config_path, _format)) =
+                worktree::set_config(&task_dir, &wt_paths, cli.config.as_ref())?
             {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
                 // A set lays its repos out as the workspace: a checkout's path
-                // in the set is its project's path, nested meta repos included
-                let tree = config::walk_projects(&task_dir, &meta_projects, None)?;
-                let project_map: std::collections::HashMap<String, ProjectInfo> =
+                // in the set is its project's path, nested meta repos included.
+                // Only a filter reads the nested configs.
+                let filtered = cli.tag.is_some() || cli.include.is_some() || cli.exclude.is_some();
+                let tree = if filtered {
+                    config::walk_projects(&task_dir, &meta_projects, None)?
+                } else {
+                    Vec::new()
+                };
+                // Compared as directories: a project at a link in the set is
+                // the checkout where the link leads
+                let real = |path: &std::path::Path| {
+                    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+                };
+                let project_map: std::collections::HashMap<PathBuf, ProjectInfo> =
                     config::build_project_map(&tree, &task_dir, "")
                         .into_iter()
-                        .map(|(place, (_, info))| (place, info))
+                        .map(|(place, (_, info))| (real(&task_dir.join(place)), info))
                         .collect();
 
                 // Filter the checkouts by their projects' tags
@@ -796,17 +807,7 @@ fn handle_command_dispatch(
                     .iter()
                     .filter(|path| {
                         if let Some(ref tag_filter) = cli.tag {
-                            let place = path
-                                .strip_prefix(&task_dir)
-                                .ok()
-                                .map(|p| {
-                                    p.components()
-                                        .map(|c| c.as_os_str().to_string_lossy())
-                                        .collect::<Vec<_>>()
-                                        .join("/")
-                                })
-                                .unwrap_or_default();
-                            if let Some(info) = project_map.get(place.as_str()) {
+                            if let Some(info) = project_map.get(&real(path)) {
                                 matches_tag_filter(&info.tags, tag_filter)
                             } else {
                                 true // Unknown projects pass through
@@ -892,6 +893,13 @@ fn handle_command_dispatch(
             }
 
             // No config found — degraded legacy path with warning
+            if let Some(tag) = &cli.tag {
+                anyhow::bail!(
+                    "No meta config found for worktree '{}', so --tag '{}' cannot select its repos",
+                    escape(&task_name),
+                    escape(tag)
+                );
+            }
             if cli.verbose {
                 eprintln!(
                     "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",

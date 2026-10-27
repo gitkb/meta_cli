@@ -55,6 +55,10 @@ pub fn select(
             id: std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)),
         })
         .collect();
+    // A name's path is its repo's, or leads there through a link
+    let names_dir = |path: &str, repo: &Repo| {
+        *path == repo.path || std::fs::canonicalize(root.join(path)).is_ok_and(|id| id == repo.id)
+    };
     let named = |flag: &str, value: &str| -> Result<Vec<&Path>> {
         let wanted = path_value(value);
         let by_path = distinct(
@@ -65,11 +69,11 @@ pub fn select(
         let by_name = if value.starts_with("./") {
             vec![]
         } else {
-            distinct(
-                repos
+            distinct(repos.iter().filter(|r| {
+                names
                     .iter()
-                    .filter(|r| names.iter().any(|(name, p)| name == value && *p == r.path)),
-            )
+                    .any(|(name, p)| name == value && names_dir(p, r))
+            }))
         };
         let listed = |repos: &[&Repo]| -> String {
             repos

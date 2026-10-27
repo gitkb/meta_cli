@@ -371,7 +371,7 @@ impl RegistryClient {
     fn fetch_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = ureq::get(url)
             .call()
-            .with_context(|| format!("Failed to fetch {url}"))?;
+            .with_context(|| format!("Failed to fetch {}", escape(url)))?;
 
         let body = response
             .into_string()
@@ -391,7 +391,7 @@ impl RegistryClient {
         let parts: Vec<&str> = repo_path.split('/').collect();
 
         if parts.len() != 2 {
-            anyhow::bail!("Invalid GitHub shorthand: {}", shorthand);
+            anyhow::bail!("Invalid GitHub shorthand: {}", escape(shorthand));
         }
 
         let (user, repo) = (parts[0], parts[1]);
@@ -405,7 +405,13 @@ impl RegistryClient {
         let response = ureq::get(&api_url)
             .set("User-Agent", "meta-cli")
             .call()
-            .with_context(|| format!("Failed to fetch latest release for {}/{}", user, repo))?;
+            .with_context(|| {
+                format!(
+                    "Failed to fetch latest release for {}/{}",
+                    escape(user),
+                    escape(repo)
+                )
+            })?;
 
         let body = response
             .into_string()
@@ -712,7 +718,7 @@ impl PluginInstaller {
     fn download(&self, url: &str) -> Result<Vec<u8>> {
         let response = ureq::get(url)
             .call()
-            .with_context(|| format!("Failed to download {url}"))?;
+            .with_context(|| format!("Failed to download {}", escape(url)))?;
 
         let mut bytes = Vec::new();
         response
@@ -728,10 +734,12 @@ impl PluginInstaller {
         let platform = RegistryClient::current_platform();
 
         // Get the download URL for the current platform and latest version
-        let releases = metadata
-            .releases
-            .get(&metadata.version)
-            .with_context(|| format!("No releases found for version {}", metadata.version))?;
+        let releases = metadata.releases.get(&metadata.version).with_context(|| {
+            format!(
+                "No releases found for version {}",
+                escape(&metadata.version)
+            )
+        })?;
 
         let download_url = self
             .get_platform_url(releases, &platform)
@@ -983,7 +991,7 @@ impl PluginInstaller {
         // Try to detect format from URL first, then fall back to magic bytes
         let format = ArchiveFormat::from_url(url)
             .or_else(|| ArchiveFormat::from_bytes(bytes))
-            .with_context(|| format!("Unsupported archive format: {url}"))?;
+            .with_context(|| format!("Unsupported archive format: {}", escape(url)))?;
 
         match format {
             ArchiveFormat::TarGz => self.extract_tar_gz(bytes),
@@ -1157,9 +1165,9 @@ impl PluginInstaller {
         let manifest = self.load_manifest()?;
         let plugin_name = ensure_plugin_prefix(plugin_name);
 
-        let entry = manifest
-            .get_plugin(&plugin_name)
-            .ok_or_else(|| anyhow::anyhow!("Plugin {} not found in manifest", plugin_name))?;
+        let entry = manifest.get_plugin(&plugin_name).ok_or_else(|| {
+            anyhow::anyhow!("Plugin {} not found in manifest", escape(&plugin_name))
+        })?;
 
         // Check if source is a GitHub shorthand
         if !entry.source.contains('/') {
@@ -1200,7 +1208,7 @@ impl PluginInstaller {
 
         let entry = manifest
             .get_plugin(&plugin_name)
-            .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", plugin_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", escape(&plugin_name)))?;
 
         // Parse source as GitHub shorthand
         let shorthand = GitHubShorthand::parse(&entry.source).ok_or_else(|| {

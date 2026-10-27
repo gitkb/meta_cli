@@ -67,6 +67,24 @@ pub fn detect_worktree_location(cwd: &Path) -> Option<(String, PathBuf)> {
     None
 }
 
+/// The config that names the members of the set at `set_dir`: the set's own
+/// (its root checkout's), else the config of the workspace meta recorded the
+/// set was made from. Only a set without meta's records looks above itself.
+pub fn set_config(
+    set_dir: &Path,
+    members: &[PathBuf],
+    config_name: Option<&PathBuf>,
+) -> Result<Option<(PathBuf, meta_core::config::ConfigFormat)>> {
+    use meta_core::config;
+    if let Some(found) = config::meta_config_at(set_dir, config_name)? {
+        return Ok(Some(found));
+    }
+    match members.iter().find_map(|m| config::recorded_project(m)) {
+        Some(source) => config::meta_config_at(&source, config_name),
+        None => config::find_meta_config(set_dir, config_name),
+    }
+}
+
 /// Discover repos within a worktree task directory by scanning for .git files.
 /// Results are sorted by alias for deterministic output.
 pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
@@ -203,9 +221,10 @@ fn discover_repos_recursive(
 }
 
 /// Discover all realized worktrees, including repos nested beneath other repos.
-/// Unlike legacy discovery, traversal errors are fatal. Hidden directories
-/// (see `ScannedDirs`) and directory symlinks are excluded; traversal never
-/// follows links outside the set.
+/// Unlike legacy discovery, traversal errors are fatal. Under a hidden
+/// directory only checkouts meta recorded in this set count (see
+/// `ScannedDirs`); directory symlinks are not followed, so traversal never
+/// leaves the set.
 /// A finite entry budget prevents unbounded scans of generated directory trees.
 pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
     Ok(discover_worktree_members_recursive(task_dir)?
