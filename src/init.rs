@@ -650,7 +650,7 @@ fn prepare_settings(path: &Path) -> Result<SettingsPlan> {
     let existing = match fs::read_to_string(path) {
         Ok(content) => Some(
             serde_json::from_str::<Value>(&content)
-                .with_context(|| format!("Invalid JSON in {} at key '$'", escape_path(path)))?,
+                .with_context(|| format!("Invalid JSON in {}", escape_path(path)))?,
         ),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
         Err(e) => return Err(e).with_context(|| format!("Failed to read {}", escape_path(path))),
@@ -790,9 +790,12 @@ fn merge_hooks_into_settings(
             shape
         )
     };
-    let obj = existing
-        .as_object_mut()
-        .ok_or_else(|| invalid("$", "an object"))?;
+    let obj = existing.as_object_mut().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Cannot merge {}: it must hold a JSON object",
+            escape_path(path)
+        )
+    })?;
     let hooks = obj
         .entry("hooks")
         .or_insert_with(|| json!({}))
@@ -865,10 +868,10 @@ mod tests {
             entries
         }
         for (content, key) in [
-            (r#"[{"user":"data"}]"#, "$"),
-            (r#"{"hooks":[],"theme":"dark"}"#, "hooks"),
-            (r#"{"hooks":{"PreToolUse":{}}}"#, "hooks.PreToolUse"),
-            ("{invalid json", "$"),
+            (r#"[{"user":"data"}]"#, "must hold a JSON object"),
+            (r#"{"hooks":[],"theme":"dark"}"#, "key 'hooks'"),
+            (r#"{"hooks":{"PreToolUse":{}}}"#, "key 'hooks.PreToolUse'"),
+            ("{invalid json", "Invalid JSON"),
         ] {
             let dir = tempdir().unwrap();
             fs::create_dir_all(dir.path().join(".claude/rules")).unwrap();
@@ -886,7 +889,7 @@ mod tests {
                     install_claude_integration_to(dir.path(), force, false, false).unwrap_err();
                 let message = format!("{err:#}");
                 assert!(message.contains(&escape_path(&settings)), "{message}");
-                assert!(message.contains(&format!("key '{key}'")), "{message}");
+                assert!(message.contains(key), "{message}");
                 assert_eq!(snapshot(dir.path()), before);
             }
         }

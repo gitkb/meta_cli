@@ -144,7 +144,7 @@ impl SubprocessPluginManager {
         // itself reports it, and `--help` still prints
         let nearest = meta_core::config::nearest_meta_dir(&cwd).unwrap_or_else(|e| {
             eprintln!(
-                "Warning: {}; skipping project plugins",
+                "Warning: {} Skipping project plugins.",
                 escape(&format!("{e:#}"))
             );
             None
