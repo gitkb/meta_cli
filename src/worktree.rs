@@ -153,7 +153,7 @@ fn discover_repos_recursive(
             continue;
         }
 
-        if !scanned.holds_members(root, &sub_path) {
+        if !ScannedDirs::searched(&sub_path) {
             continue;
         }
 
@@ -163,6 +163,9 @@ fn discover_repos_recursive(
             .map(|m| m.is_file())
             .unwrap_or(false)
         {
+            if !scanned.member(root, &sub_path) {
+                continue;
+            }
             // This is a worktree repo — use relative path from root as alias
             let source = match source_repo_from_gitfile(&sub_git) {
                 Ok(s) => s,
@@ -221,41 +224,38 @@ pub struct WorktreeMemberInfo {
     pub source_path: PathBuf,
 }
 
-/// Which directories of a set may hold its members. Hidden directories
-/// (`.git`, a nested `.worktrees`, `.claude/worktrees` of an agent) don't,
-/// except on the way to a project the set's config puts at a hidden path
-/// (`.deps/x`).
+/// Which checkouts in a set are its members. `.git` and a nested
+/// `.worktrees` hold none. Under another hidden directory, only a checkout
+/// meta's record says it made for this set counts: a project may live at
+/// `.deps/x`, but a tool's own worktrees (`.claude/worktrees/x`) are not the
+/// set's.
 struct ScannedDirs {
-    hidden_project_dirs: std::collections::HashSet<PathBuf>,
+    set: PathBuf,
 }
 
 impl ScannedDirs {
     fn of(task_dir: &Path) -> Self {
-        let paths = meta_core::config::walk_meta_tree(task_dir, None)
-            .map(|tree| meta_core::config::build_project_map(&tree, task_dir, ""))
-            .unwrap_or_default();
-        let hidden_project_dirs = paths
-            .into_values()
-            .filter_map(|(path, _)| path.strip_prefix(task_dir).ok().map(Path::to_path_buf))
-            .flat_map(|path| path.ancestors().map(Path::to_path_buf).collect::<Vec<_>>())
-            .collect();
         ScannedDirs {
-            hidden_project_dirs,
+            set: task_dir
+                .canonicalize()
+                .unwrap_or_else(|_| task_dir.to_path_buf()),
         }
     }
 
-    /// Whether `dir`, inside the set at `root`, may hold members.
-    fn holds_members(&self, root: &Path, dir: &Path) -> bool {
-        let Some(name) = dir.file_name() else {
-            return true;
-        };
-        if name == ".git" || name == ".worktrees" {
-            return false;
-        }
-        !name.to_string_lossy().starts_with('.')
-            || dir
-                .strip_prefix(root)
-                .is_ok_and(|place| self.hidden_project_dirs.contains(place))
+    /// Whether to look for members inside `dir`.
+    fn searched(dir: &Path) -> bool {
+        dir.file_name()
+            .is_none_or(|name| name != ".git" && name != ".worktrees")
+    }
+
+    /// Whether the checkout at `dir`, inside the set at `root`, is a member.
+    fn member(&self, root: &Path, dir: &Path) -> bool {
+        let hidden = dir.strip_prefix(root).is_ok_and(|place| {
+            place
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        });
+        !hidden || meta_core::config::recorded_set(dir).as_ref() == Some(&self.set)
     }
 }
 
@@ -265,7 +265,7 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
     let entries = walkdir::WalkDir::new(task_dir)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| entry.depth() == 0 || scanned.holds_members(task_dir, entry.path()));
+        .filter_entry(|entry| entry.depth() == 0 || ScannedDirs::searched(entry.path()));
     for (count, entry) in entries.enumerate() {
         anyhow::ensure!(
             count < 2_000_000,
@@ -286,7 +286,7 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
                     .with_context(|| format!("Cannot inspect {}", escape_path(&git_file)))
             }
         };
-        if !metadata.is_file() {
+        if !metadata.is_file() || !scanned.member(task_dir, path) {
             continue;
         }
         validate_worktree_gitfile(&git_file)?;
@@ -512,19 +512,21 @@ mod recursive_tests {
 
     #[cfg(unix)]
     #[test]
-    /// A repo the set's config puts at a hidden path is a member; other
-    /// hidden directories (a nested set, an agent's own worktrees) and
-    /// symlink cycles are excluded from traversal.
-    fn recursive_finds_configured_hidden_paths_only() {
+    /// Under a hidden directory, a checkout meta recorded for this set is a
+    /// member; others (an agent's own worktrees), a nested set and symlink
+    /// cycles are not.
+    fn recursive_finds_recorded_hidden_members_only() {
         let temp = tempfile::tempdir().unwrap();
         let root = temp.path().canonicalize().unwrap();
-        std::fs::write(
-            root.join(".meta.json"),
-            r#"{"projects": {"child": {"repo": "x", "path": ".deps/child"}}}"#,
-        )
-        .unwrap();
         member(&root, "visible");
         member(&root, ".deps/child");
+        let gitfile = std::fs::read_to_string(root.join(".deps/child/.git")).unwrap();
+        let admin = Path::new(gitfile.trim().strip_prefix("gitdir: ").unwrap());
+        std::fs::write(
+            admin.join(meta_core::config::WORKTREE_RECORD_FILE),
+            serde_json::json!({ "project": "/p", "set": root }).to_string(),
+        )
+        .unwrap();
         member(&root, ".claude/worktrees/agent");
         member(&root, ".worktrees/other");
         std::os::unix::fs::symlink(&root, root.join("visible/cycle")).unwrap();

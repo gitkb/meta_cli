@@ -784,7 +784,7 @@ fn handle_command_dispatch(
 
                 // A set lays its repos out as the workspace: a checkout's path
                 // in the set is its project's path, nested meta repos included
-                let tree = config::walk_meta_tree(&task_dir, None).unwrap_or_default();
+                let tree = config::walk_projects(&task_dir, &meta_projects, None)?;
                 let project_map: std::collections::HashMap<String, ProjectInfo> =
                     config::build_project_map(&tree, &task_dir, "")
                         .into_iter()
@@ -827,7 +827,7 @@ fn handle_command_dispatch(
                     eprintln!(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
                         "warning".yellow().bold(),
-                        cli.tag.as_deref().unwrap_or(""),
+                        escape(cli.tag.as_deref().unwrap_or("")),
                         escape(&task_name)
                     );
                     return Ok(());
