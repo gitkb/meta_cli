@@ -468,7 +468,9 @@ fn main() -> std::process::ExitCode {
             if e.downcast_ref::<loop_lib::StdoutError>()
                 .is_some_and(|e| e.0.kind() == std::io::ErrorKind::BrokenPipe) =>
         {
-            std::process::ExitCode::SUCCESS
+            // As a shell reports a command a closed pipe stopped (128 + SIGPIPE),
+            // so a failure it hid isn't reported as success
+            std::process::ExitCode::from(141)
         }
         Err(e) => {
             // as Rust prints an error returned from main, but escaped: it can
