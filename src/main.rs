@@ -607,7 +607,7 @@ fn run_cli() -> Result<()> {
 
                 if is_root_help || (is_bare && !is_promoted) {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
-                        println!("{help_text}");
+                        subprocess_plugins::print_output(&format!("{help_text}\n"))?;
                         return Ok(());
                     }
                 }
@@ -684,16 +684,6 @@ fn handle_command_dispatch(
         );
         defaults.parallel
     };
-
-    if !is_explicit_exec
-        && command_args.first().is_some_and(|s| s == "project")
-        && command_args
-            .get(1)
-            .is_some_and(|s| s == "list" || s == "ls")
-        && (cli.include.is_some() || cli.exclude.is_some())
-    {
-        anyhow::bail!("meta project list does not take --include/--exclude");
-    }
 
     let command_str = loop_lib::display_command(&command_args);
 
@@ -1159,13 +1149,6 @@ fn handle_plugin_command(
                 return Ok(());
             }
             if local {
-                let cwd = std::env::current_dir()?;
-                if config::nearest_meta_dir(&cwd)?.is_none() {
-                    if !json {
-                        println!("Not in a meta workspace");
-                    }
-                    return Ok(());
-                }
                 let installer = PluginInstaller::new_local(verbose)?;
                 let plugins = installer.list_plugins_detailed()?;
                 if json {

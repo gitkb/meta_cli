@@ -41,46 +41,35 @@ pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
         return Ok(None);
     };
     let (sender, receiver) = std::sync::mpsc::channel();
-    let reader = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let result = stdout.read_to_end(&mut bytes).map(|_| bytes);
-        let _ = sender.send(result);
+        let _ = sender.send(stdout.read_to_end(&mut bytes).map(|_| bytes));
     });
-    let mut status = None;
-    let mut output = None;
-    loop {
-        if status.is_none() {
-            status = match child.try_wait() {
-                Ok(status) => status,
-                Err(_) => break,
-            };
-        }
-        if output.is_none() {
-            match receiver.try_recv() {
-                Ok(result) => output = Some(result),
-                Err(std::sync::mpsc::TryRecvError::Empty) => {}
-                Err(std::sync::mpsc::TryRecvError::Disconnected) => break,
+    // stdout ends once the plugin, and anything it started that holds it, is done
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if let Ok(output) = receiver.recv_timeout(remaining) {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Ok(output
+                        .ok()
+                        .filter(|_| status.success())
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("Cannot wait for plugin {}; skipping", escape_path(path))
+                    })
+                }
             }
         }
-        if let (Some(status), Some(output)) = (status.as_ref(), output.as_ref()) {
-            let _ = reader.join();
-            return Ok(if status.success() {
-                output
-                    .as_ref()
-                    .ok()
-                    .and_then(|bytes| serde_json::from_slice(bytes).ok())
-            } else {
-                None
-            });
-        }
-        let remaining = deadline.saturating_duration_since(Instant::now());
-        if remaining.is_zero() {
-            break;
-        }
-        std::thread::sleep(remaining.min(Duration::from_millis(10)));
     }
     // A wrapper may already have exited while its descendants hold stdout open.
-    // Kill its process group even when try_wait has reaped the wrapper.
+    // Kill its process group even when the wrapper itself has exited.
     #[cfg(unix)]
     if let Ok(pid) = i32::try_from(child.id()) {
         // SAFETY: the child was started as leader of its own process group.
@@ -88,15 +77,25 @@ pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
             libc::kill(-pid, libc::SIGKILL);
         }
     }
+    // Elsewhere only the plugin itself is killed: a process it started that
+    // still holds stdout outlives it, but meta doesn't wait for that reader
     let _ = child.kill();
     let _ = child.wait();
-    if reader.is_finished() {
-        let _ = reader.join();
-    }
     anyhow::bail!(
         "Plugin {} did not answer --meta-plugin-info within 5 seconds; skipping",
         escape_path(path)
     )
+}
+
+/// Print a plugin's output. A closed stdout (`meta ... | head`) ends meta
+/// quietly, as it does for command output.
+pub(crate) fn print_output(text: &str) -> Result<()> {
+    use std::io::Write;
+    std::io::stdout()
+        .lock()
+        .write_all(text.as_bytes())
+        .map_err(loop_lib::StdoutError)?;
+    Ok(())
 }
 
 /// A discovered subprocess plugin
@@ -129,8 +128,8 @@ impl SubprocessPluginManager {
     /// Discover and load all subprocess plugins
     ///
     /// Discovery order (first match wins):
-    /// 1. `.meta/plugins/` of each meta directory from the nearest one up to
-    ///    its workspace's root (`meta_core::config::workspace_root`)
+    /// 1. `.meta/plugins/` of each of the workspace's meta directories, from
+    ///    the nearest one up (`meta_core::config::workspace_meta_dirs`)
     /// 2. `meta_core::meta_dir()/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
@@ -141,11 +140,7 @@ impl SubprocessPluginManager {
         // up to its workspace's root, nearest first, independently of --config
         let cwd = std::env::current_dir()?;
         if let Some(nearest) = meta_core::config::nearest_meta_dir(&cwd)? {
-            let root = meta_core::config::workspace_root(&nearest);
-            for dir in nearest.ancestors().take_while(|dir| dir.starts_with(&root)) {
-                if meta_core::config::find_meta_config_in(dir)?.is_none() {
-                    continue;
-                }
+            for dir in meta_core::config::workspace_meta_dirs(&nearest) {
                 let plugin_dir = dir.join(".meta/plugins");
                 if visited.insert(resolved(&plugin_dir)) {
                     self.scan_directory(&plugin_dir)?;
@@ -377,7 +372,7 @@ impl SubprocessPluginManager {
             // Plugin already printed its error to stderr. What it printed
             // before failing (say the worktrees it removed before a store
             // error) is shown too; then its exit code is propagated.
-            print!("{}", String::from_utf8_lossy(&output.stdout));
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), &output.stdout);
             std::process::exit(output.status.code().unwrap_or(1));
         }
 
@@ -391,7 +386,7 @@ impl SubprocessPluginManager {
 
         // If stdout doesn't look like JSON, print it (legacy plugin output)
         if !stdout_str.trim().starts_with('{') {
-            print!("{stdout_str}");
+            print_output(&stdout_str)?;
             return Ok(true);
         }
 
@@ -411,7 +406,7 @@ impl SubprocessPluginManager {
             ),
             Err(_) => {
                 // Not a plan - print output as-is
-                print!("{stdout_str}");
+                print_output(&stdout_str)?;
                 Ok(true)
             }
         }

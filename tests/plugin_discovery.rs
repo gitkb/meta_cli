@@ -79,6 +79,7 @@ fn bare_home_meta_directory_is_neither_workspace_nor_project_plugin_source() {
     assert!(!String::from_utf8_lossy(&help.stdout).contains("fake"));
     for args in [
         vec!["plugin", "list", "--local"],
+        vec!["plugin", "list", "--local", "--json"],
         vec!["plugin", "install", "--local", "missing/repo"],
         vec!["plugin", "uninstall", "--local", "missing"],
         vec!["plugin", "update", "--local", "missing"],
@@ -89,6 +90,7 @@ fn bare_home_meta_directory_is_neither_workspace_nor_project_plugin_source() {
             String::from_utf8_lossy(&output.stdout),
             String::from_utf8_lossy(&output.stderr)
         );
+        assert!(!output.status.success(), "{args:?}");
         assert!(text.contains("Not in a meta workspace"), "{args:?}: {text}");
     }
 }

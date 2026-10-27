@@ -681,6 +681,10 @@ fn write_settings_atomic(path: &Path, content: &str) -> Result<()> {
         )
     })?;
     temp.write_all(content.as_bytes())?;
+    // The temporary file is private; keep the mode settings.json had
+    if let Ok(meta) = fs::metadata(path) {
+        temp.as_file().set_permissions(meta.permissions())?;
+    }
     temp.persist(path)
         .with_context(|| format!("Failed to write {}", escape_path(path)))?;
     Ok(())
@@ -694,10 +698,27 @@ fn installed_hooks(settings: &Value) -> Vec<String> {
             groups
                 .as_array()?
                 .iter()
-                .all(|group| existing.contains(group))
+                .all(|group| existing.iter().any(|found| same_group(found, group)))
                 .then_some(key)
         })
         .collect()
+}
+
+/// Whether two hook groups run the same hooks for the same tool calls: the
+/// same matcher and the same hook types, commands and prompts. Other fields,
+/// such as a timeout the user changed, don't make a group another one.
+fn same_group(a: &Value, b: &Value) -> bool {
+    type Hook<'a> = (Option<&'a Value>, Option<&'a Value>, Option<&'a Value>);
+    fn hooks(group: &Value) -> Option<Vec<Hook<'_>>> {
+        let hooks = group.get("hooks")?.as_array()?;
+        Some(
+            hooks
+                .iter()
+                .map(|h| (h.get("type"), h.get("command"), h.get("prompt")))
+                .collect(),
+        )
+    }
+    a.get("matcher") == b.get("matcher") && hooks(a) == hooks(b)
 }
 
 /// Build the meta hooks configuration as a JSON object
@@ -774,7 +795,7 @@ fn merge_hooks_into_settings(
             .ok_or_else(|| invalid(&format!("hooks.{key}"), "an array"))?;
         if let Some(groups) = groups.as_array() {
             for group in groups {
-                if !arr.contains(group) {
+                if !arr.iter().any(|found| same_group(found, group)) {
                     arr.push(group.clone());
                 }
             }
@@ -858,6 +879,31 @@ mod tests {
                 assert_eq!(snapshot(dir.path()), before);
             }
         }
+    }
+
+    #[test]
+    fn a_changed_hook_timeout_is_still_metas_hook() {
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        let mut hooks = build_meta_hooks();
+        hooks["SessionStart"][0]["hooks"][0]["timeout"] = json!(30);
+        fs::write(&settings, json!({ "hooks": hooks }).to_string()).unwrap();
+        let plan = prepare_settings(&settings).unwrap();
+        assert!(plan.content.is_none(), "{}", plan.message);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn merged_settings_keep_their_file_mode() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let settings = dir.path().join("settings.json");
+        fs::write(&settings, r#"{"theme":"dark"}"#).unwrap();
+        fs::set_permissions(&settings, fs::Permissions::from_mode(0o644)).unwrap();
+        let plan = prepare_settings(&settings).unwrap();
+        write_settings_atomic(&settings, &plan.content.unwrap()).unwrap();
+        let mode = fs::metadata(&settings).unwrap().permissions().mode();
+        assert_eq!(mode & 0o777, 0o644);
     }
 
     #[test]
