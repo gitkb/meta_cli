@@ -151,9 +151,9 @@ fn discover_repos_recursive(
             continue;
         }
 
-        // Skip hidden directories
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
+        // A repo may live at a hidden path (`.deps/x`); git's own directory
+        // and a nested worktree directory hold no members of this set
+        if is_not_a_member_dir(&entry.file_name()) {
             continue;
         }
 
@@ -200,8 +200,9 @@ fn discover_repos_recursive(
 }
 
 /// Discover all realized worktrees, including repos nested beneath other repos.
-/// Unlike legacy discovery, traversal errors are fatal. Hidden directories and
-/// directory symlinks are excluded; traversal never follows links outside the set.
+/// Unlike legacy discovery, traversal errors are fatal. `.git`, nested
+/// `.worktrees` and directory symlinks are excluded; traversal never follows
+/// links outside the set.
 /// A finite entry budget prevents unbounded scans of generated directory trees.
 pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
     Ok(discover_worktree_members_recursive(task_dir)?
@@ -220,14 +221,18 @@ pub struct WorktreeMemberInfo {
     pub source_path: PathBuf,
 }
 
+/// Git's own directory and a nested worktree directory, which hold no
+/// members of the set being scanned.
+fn is_not_a_member_dir(name: &std::ffi::OsStr) -> bool {
+    name == ".git" || name == ".worktrees"
+}
+
 pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<WorktreeMemberInfo>> {
     let mut repos = Vec::new();
     let entries = walkdir::WalkDir::new(task_dir)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| {
-            entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
-        });
+        .filter_entry(|entry| entry.depth() == 0 || !is_not_a_member_dir(entry.file_name()));
     for (count, entry) in entries.enumerate() {
         anyhow::ensure!(
             count < 2_000_000,
@@ -474,15 +479,17 @@ mod recursive_tests {
 
     #[cfg(unix)]
     #[test]
-    /// Hidden directories and symlink cycles are excluded from traversal.
-    fn recursive_skips_hidden_directories_and_symlink_cycles() {
+    /// A repo at a hidden path is a member; a nested set and symlink cycles
+    /// are excluded from traversal.
+    fn recursive_finds_hidden_paths_but_skips_nested_sets_and_cycles() {
         let temp = tempfile::tempdir().unwrap();
         member(temp.path(), "visible");
         member(temp.path(), ".hidden/child");
+        member(temp.path(), ".worktrees/other");
         std::os::unix::fs::symlink(temp.path(), temp.path().join("visible/cycle")).unwrap();
         assert_eq!(
             aliases(discover_worktree_repos_recursive(temp.path()).unwrap()),
-            ["visible"]
+            [".hidden/child", "visible"]
         );
     }
     /// Relative Git links resolve against the checkout, independently of cwd.

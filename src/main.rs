@@ -782,20 +782,27 @@ fn handle_command_dispatch(
             {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
-                // Build name→info lookup for tag filtering
+                // A set lays its repos out as the workspace: a checkout's path
+                // in the set is its project's path
                 let project_map: std::collections::HashMap<&str, &ProjectInfo> =
-                    meta_projects.iter().map(|p| (p.name.as_str(), p)).collect();
+                    meta_projects.iter().map(|p| (p.path.as_str(), p)).collect();
 
-                // Derive aliases from worktree paths and filter by tags
+                // Filter the checkouts by their projects' tags
                 let wt_directories: Vec<String> = wt_paths
                     .iter()
                     .filter(|path| {
                         if let Some(ref tag_filter) = cli.tag {
-                            let alias = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| ".".to_string());
-                            if let Some(info) = project_map.get(alias.as_str()) {
+                            let place = path
+                                .strip_prefix(&task_dir)
+                                .ok()
+                                .map(|p| {
+                                    p.components()
+                                        .map(|c| c.as_os_str().to_string_lossy())
+                                        .collect::<Vec<_>>()
+                                        .join("/")
+                                })
+                                .unwrap_or_default();
+                            if let Some(info) = project_map.get(place.as_str()) {
                                 matches_tag_filter(&info.tags, tag_filter)
                             } else {
                                 true // Unknown projects pass through
@@ -807,9 +814,13 @@ fn handle_command_dispatch(
                     .map(|p| p.display().to_string())
                     .collect();
 
-                // A worktree member sits at its alias, so its path in the set
-                // is the name to select it by
-                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
+                // Selected by project name or by its path in the set
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
+                    meta_projects
+                        .iter()
+                        .map(|p| (p.name.clone(), p.path.clone()))
+                        .collect()
+                })?;
 
                 if wt_directories.is_empty() {
                     eprintln!(

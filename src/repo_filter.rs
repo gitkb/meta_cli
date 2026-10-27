@@ -101,7 +101,7 @@ pub fn select(
             bail!(
                 "{flag} '{value}' names none of the repos this command runs in. Use a repo's \
                  name from .meta or its path from the workspace root (`.` for the root), as \
-                 `meta project list` shows it; in a worktree set, its alias. --tag and \
+                 `meta project list` shows it; in a worktree set, the same, from the set's root. --tag and \
                  --recursive change which repos the command runs in."
             );
         }
