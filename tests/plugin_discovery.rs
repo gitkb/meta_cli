@@ -139,6 +139,33 @@ fn nested_meta_dir_reads_its_workspace_plugins_but_not_an_unlisting_parent() {
 }
 
 #[test]
+fn a_worktree_set_checkout_reads_its_own_and_its_main_checkouts_plugins() {
+    let f = Fixture::new(true);
+    // A set's root checkout, laid out as git and meta leave it
+    let admin = f.cwd.join(".git/worktrees/s1");
+    fs::create_dir_all(&admin).unwrap();
+    fs::write(admin.join("commondir"), "../..\n").unwrap();
+    fs::write(admin.join("meta-worktree.json"), "{}").unwrap();
+    let set = f.cwd.join(".worktrees/s1");
+    fs::create_dir_all(&set).unwrap();
+    fs::write(set.join(".meta.yaml"), "projects: {}\n").unwrap();
+    fs::write(set.join(".git"), format!("gitdir: {}\n", admin.display())).unwrap();
+    plugin(&f.cwd.join(".meta/plugins/meta-main"), "main", "1");
+    plugin(&set.join(".meta/plugins/meta-setlocal"), "setlocal", "1");
+    let output = f
+        .command(&["plugin", "list", "--json"])
+        .current_dir(&set)
+        .output()
+        .unwrap();
+    assert!(output.status.success());
+    let text = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        text.contains("setlocal") && text.contains("\"main\""),
+        "{text}"
+    );
+}
+
+#[test]
 fn explicit_config_does_not_redirect_plugin_scope() {
     let f = Fixture::new(true);
     let other = f.home.join("other");

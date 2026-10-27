@@ -497,7 +497,7 @@ fn run_cli() -> Result<()> {
         })
         .init();
 
-    let mut cli = Cli::parse();
+    let mut cli: Cli = meta_cli::args::parse();
 
     log::debug!("cli.json = {}", cli.json);
 
