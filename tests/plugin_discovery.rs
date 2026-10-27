@@ -287,6 +287,8 @@ fn orphan_hint_names_actual_parent_config() {
         let output = f.run(&["--help"]);
         assert!(output.status.success());
         let err = String::from_utf8_lossy(&output.stderr);
+        // meta names the parent by its resolved path (/private/var on macOS)
+        let parent_config = f.home.canonicalize().unwrap().join(name);
         assert!(
             err.contains(&format!(
                 "To include it, add to {}:",

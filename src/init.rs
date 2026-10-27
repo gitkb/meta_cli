@@ -846,7 +846,7 @@ mod tests {
                 "keep this rule",
             )
             .unwrap();
-            let settings = dir.path().join(".claude/settings.json");
+            let settings = dir.path().join(".claude").join("settings.json");
             fs::write(&settings, content).unwrap();
             let before = snapshot(dir.path());
             for force in [false, true] {
