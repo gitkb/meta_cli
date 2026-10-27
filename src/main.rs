@@ -477,14 +477,20 @@ fn exit_quietly_on_closed_stdout() {
             .map(String::as_str)
             .or_else(|| payload.downcast_ref::<&str>().copied())
             .unwrap_or("");
-        // std's wording; "os error 232" is Windows' closed pipe
-        if message.starts_with("failed printing to stdout")
-            && (message.contains("Broken pipe") || message.contains("os error 232"))
-        {
+        if is_closed_stdout_panic(message) {
             std::process::exit(CLOSED_STDOUT.into());
         }
         report(info)
     }));
+}
+
+/// Whether `message` is std's panic for printing to a closed stdout: a
+/// broken pipe, which Windows reports as os error 109 or 232.
+fn is_closed_stdout_panic(message: &str) -> bool {
+    message.starts_with("failed printing to stdout")
+        && ["Broken pipe", "(os error 109)", "(os error 232)"]
+            .iter()
+            .any(|closed| message.contains(closed))
 }
 
 fn main() -> std::process::ExitCode {
@@ -1548,6 +1554,21 @@ fn flatten_filtered_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_stdout_panics_are_recognised_on_every_platform() {
+        for message in [
+            "failed printing to stdout: Broken pipe (os error 32)",
+            "failed printing to stdout: The pipe has been ended. (os error 109)",
+            "failed printing to stdout: The pipe is being closed. (os error 232)",
+        ] {
+            assert!(is_closed_stdout_panic(message), "{message}");
+        }
+        assert!(!is_closed_stdout_panic(
+            "failed printing to stdout: No space left on device (os error 28)"
+        ));
+        assert!(!is_closed_stdout_panic("index out of bounds: Broken pipe"));
+    }
     use std::io::Write;
     use tempfile::NamedTempFile;
 

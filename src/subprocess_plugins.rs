@@ -35,7 +35,7 @@ pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
         Ok(child) => child,
         Err(_) => return Ok(None),
     };
-    let Some(mut stdout) = child.stdout.take() else {
+    let Some(stdout) = child.stdout.take() else {
         let _ = child.kill();
         let _ = child.wait();
         return Ok(None);
@@ -43,7 +43,8 @@ pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
     let (sender, receiver) = std::sync::mpsc::channel();
     std::thread::spawn(move || {
         let mut bytes = Vec::new();
-        let _ = sender.send(stdout.read_to_end(&mut bytes).map(|_| bytes));
+        // Plugin info is small; a plugin flooding stdout can't fill memory
+        let _ = sender.send(stdout.take(1 << 20).read_to_end(&mut bytes).map(|_| bytes));
     });
     // stdout ends once the plugin, and anything it started that holds it, is done
     let remaining = deadline.saturating_duration_since(Instant::now());
