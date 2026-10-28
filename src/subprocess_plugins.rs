@@ -309,6 +309,11 @@ impl SubprocessPluginManager {
     }
 
     /// Execute a command via the plugin that owns it; false if none does.
+    /// Whether a plugin claims this command.
+    pub fn claims(&self, args: &[String]) -> bool {
+        self.route(args).is_some()
+    }
+
     pub fn execute(
         &self,
         args: &[String],

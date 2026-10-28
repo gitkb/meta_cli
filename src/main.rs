@@ -909,7 +909,11 @@ fn handle_command_dispatch(
                 return Ok(());
             }
 
-            // No config found — degraded legacy path with warning
+            // No config found. A plugin command needs one, as outside a set;
+            // `meta exec` still runs in the set's checkouts.
+            if !is_explicit_exec && plugins.claims(&command_args) {
+                config_not_found(cli, &current_dir);
+            }
             if let Some(tag) = &cli.tag {
                 anyhow::bail!(
                     "No meta config found for worktree '{}', so --tag '{}' cannot select its repos",
@@ -952,26 +956,7 @@ fn handle_command_dispatch(
 
     let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref())? {
         Some(path) => path,
-        None => {
-            let config_name = cli
-                .config
-                .as_ref()
-                .map(|p| escape_path(p))
-                .unwrap_or_else(|| config::META_CONFIG_NAME.to_string());
-            let message = format!(
-                "Could not find meta config file '{config_name}'\nSearched from {} up to root",
-                escape_path(&current_dir)
-            );
-            // A JSON caller can tell a missing config from any other failure
-            if cli.json {
-                let error = serde_json::json!({
-                    "error": {"code": "config_not_found", "message": message}
-                });
-                println!("{error}");
-            }
-            eprintln!("Error: {message}");
-            std::process::exit(1);
-        }
+        None => config_not_found(cli, &current_dir),
     };
 
     let meta_dir = absolute_path.parent().unwrap_or(std::path::Path::new("."));
@@ -1485,6 +1470,29 @@ fn select_repos(
         return Ok(dirs);
     }
     repo_filter::select(&include, &exclude, &dirs, root, &names())
+}
+
+/// Report that no meta config was found from `dir`, then exit 1. A JSON
+/// caller also gets the error as JSON on stdout, so it can tell a missing
+/// config from any other failure.
+fn config_not_found(cli: &Cli, dir: &std::path::Path) -> ! {
+    let config_name = cli
+        .config
+        .as_ref()
+        .map(|p| escape_path(p))
+        .unwrap_or_else(|| config::META_CONFIG_NAME.to_string());
+    let message = format!(
+        "Could not find meta config file '{config_name}'\nSearched from {} up to root",
+        escape_path(dir)
+    );
+    if cli.json {
+        let error = serde_json::json!({
+            "error": {"code": "config_not_found", "message": message}
+        });
+        println!("{error}");
+    }
+    eprintln!("Error: {message}");
+    std::process::exit(1);
 }
 
 /// Print unrecognized command error with suggestion and help, then exit.

@@ -45,9 +45,13 @@ fn meta(root: &Path, args: &[&str]) {
 }
 
 fn run_meta(root: &Path, args: &[&str]) -> std::process::Output {
+    run_meta_in(root, root, args)
+}
+
+fn run_meta_in(root: &Path, cwd: &Path, args: &[&str]) -> std::process::Output {
     std::process::Command::new(env!("CARGO_BIN_EXE_meta"))
         .args(args)
-        .current_dir(root)
+        .current_dir(cwd)
         .env("HOME", root)
         .env("XDG_CONFIG_HOME", root.join("xdg"))
         .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
@@ -126,4 +130,46 @@ esac
     );
     assert!(stderr.contains("upgrade the plugin"), "{stderr}");
     assert!(stderr.contains(&plugin.display().to_string()), "{stderr}");
+}
+
+#[test]
+fn a_plugin_command_in_a_plain_git_worktree_needs_a_config() {
+    let temp = tempdir().unwrap();
+    let root = temp.path().canonicalize().unwrap();
+    workspace(&root);
+    fs::remove_file(root.join(".meta.yaml")).unwrap();
+    // A plain Git worktree under `.worktrees`, with no meta config anywhere
+    let repo = root.join("plain");
+    fs::create_dir_all(&repo).unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &["commit", "-q", "--allow-empty", "-m", "init"],
+        &["worktree", "add", "-q", ".worktrees/x"],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+            .args(["-c", "commit.gpgSign=false"])
+            .args(args)
+            .current_dir(&repo)
+            .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .status()
+            .unwrap();
+        assert!(status.success(), "git {args:?}");
+    }
+    let set = repo.join(".worktrees/x");
+
+    let output = run_meta_in(&root, &set, &["--json", "touch", "file"]);
+    assert_eq!(output.status.code(), Some(1));
+    let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
+    assert_eq!(value["error"]["code"], "config_not_found");
+    assert!(!set.join("file").exists(), "ran the plugin's command raw");
+    assert!(!root.join("plugin.log").exists());
+
+    // `meta exec` still runs in the set's checkout
+    let output = run_meta_in(&root, &set, &["exec", "--", "touch", "ran"]);
+    assert!(output.status.success());
+    assert!(set.join("ran").exists());
 }
