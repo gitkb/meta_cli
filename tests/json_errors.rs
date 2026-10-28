@@ -38,6 +38,7 @@ fn json_callers_without_a_config_get_a_json_error() {
     for args in [
         vec!["project", "list", "--recursive", "--json"],
         vec!["--json", "git", "worktree", "list"],
+        vec!["--json", "exec", "--", "true"],
     ] {
         let output = meta(&outside, &home, &args);
         assert_eq!(json_error_code(&output), "config_not_found", "{args:?}");
