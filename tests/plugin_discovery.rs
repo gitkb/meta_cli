@@ -317,7 +317,10 @@ fn old_config_names_are_not_a_workspace() {
         let out = f.run(&["exec", "--", "true"]);
         assert!(!out.status.success(), "{name}");
         let err = String::from_utf8_lossy(&out.stderr);
-        assert!(err.contains("Could not find meta config file"), "{err}");
+        assert!(
+            err.contains("Could not find meta config file '.meta.yaml'"),
+            "{err}"
+        );
     }
 }
 
