@@ -770,15 +770,16 @@ fn handle_command_dispatch(
                 .map(|member| member.path)
                 .collect();
             // Inside a set, a command never falls back to the workspace's
-            // own checkouts: they aren't the ones the caller is in
-            if paths.is_empty() {
+            // own checkouts: they aren't the ones the caller is in. A plain
+            // clone that is merely under a `.worktrees` directory is no set.
+            if paths.is_empty() && worktree::holds_linked_checkout(&root) {
                 anyhow::bail!(
                     "No checkouts of worktree set '{}' found in {}. Run from a set meta made, or pass --primary to run in the workspace.",
                     escape(&name),
                     escape_path(&root)
                 );
             }
-            Some((name, root, paths))
+            (!paths.is_empty()).then_some((name, root, paths))
         } else {
             None
         };

@@ -127,6 +127,24 @@ fn not_held(
         .collect()
 }
 
+/// Whether a linked worktree's checkout (one whose `.git` is a file) is
+/// under `dir`. Plain clones (a `.git` directory) are not looked inside.
+pub fn holds_linked_checkout(dir: &Path) -> bool {
+    let mut walk = walkdir::WalkDir::new(dir).follow_links(false).into_iter();
+    while let Some(entry) = walk.next() {
+        let Ok(entry) = entry else { continue };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        match std::fs::symlink_metadata(entry.path().join(".git")) {
+            Ok(meta) if meta.is_file() => return true,
+            Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Discover repos within a worktree task directory by scanning for .git files.
 /// Results are sorted by alias for deterministic output.
 pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
