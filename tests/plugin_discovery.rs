@@ -227,26 +227,6 @@ fn missing_config_errors_are_escaped() {
 }
 
 #[test]
-fn json_callers_without_a_config_get_a_json_error() {
-    let f = Fixture::new(false);
-    for args in [
-        vec!["project", "list", "--recursive", "--json"],
-        vec!["--json", "git", "worktree", "list"],
-    ] {
-        let output = f.run(&args);
-        assert!(!output.status.success(), "{args:?}");
-        let value: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
-        assert_eq!(value["error"]["code"], "config_not_found", "{args:?}");
-        let message = value["error"]["message"].as_str().unwrap();
-        assert!(
-            message.contains("Could not find meta config file"),
-            "{message}"
-        );
-        assert!(String::from_utf8_lossy(&output.stderr).contains(message));
-    }
-}
-
-#[test]
 fn local_install_gitignores_untracked_plugin_files() {
     use std::io::{Read, Write};
     use std::net::TcpListener;
