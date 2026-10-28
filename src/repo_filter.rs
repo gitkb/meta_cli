@@ -55,7 +55,7 @@ pub fn select(
             id: std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)),
         })
         .collect();
-    // A name's path is its repo's, or leads there through a link
+    // A path is the repo's, or leads there through a link
     let names_dir = |path: &str, repo: &Repo| {
         *path == repo.path || std::fs::canonicalize(root.join(path)).is_ok_and(|id| id == repo.id)
     };
@@ -64,7 +64,7 @@ pub fn select(
         let by_path = distinct(
             repos
                 .iter()
-                .filter(|r| wanted.as_deref() == Some(r.path.as_str())),
+                .filter(|r| wanted.as_deref().is_some_and(|path| names_dir(path, r))),
         );
         let by_name = if value.starts_with("./") {
             vec![]

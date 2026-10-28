@@ -764,7 +764,16 @@ fn handle_command_dispatch(
                 .into_iter()
                 .map(|member| member.path)
                 .collect();
-            (!paths.is_empty()).then_some((name, root, paths))
+            // Inside a set, a command never falls back to the workspace's
+            // own checkouts: they aren't the ones the caller is in
+            if paths.is_empty() {
+                anyhow::bail!(
+                    "No checkouts of worktree set '{}' found in {}. Run from a set meta made, or pass --primary to run in the workspace.",
+                    escape(&name),
+                    escape_path(&root)
+                );
+            }
+            Some((name, root, paths))
         } else {
             None
         };
