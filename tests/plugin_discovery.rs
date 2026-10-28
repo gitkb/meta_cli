@@ -503,7 +503,7 @@ fn verbose_dispatch_keeps_a_plugins_name_on_its_line() {
         &f.data.join("plugins/meta-demo"),
         r#"case "$1" in
 --meta-plugin-info) printf '%s\n' '{"name":"bad\u001b[2J\nFORGED","version":"1","commands":["demo run"]}' ;;
-*) exit 0 ;;
+*) cat >/dev/null ;;
 esac"#,
     );
     let out = f.run(&["--verbose", "demo", "run"]);
@@ -528,7 +528,7 @@ fn an_unreadable_plan_names_the_plugin_on_one_line() {
         &cwd.join(".meta/plugins/meta-demo"),
         r#"case "$1" in
 --meta-plugin-info) printf '%s\n' '{"name":"demo","version":"1","commands":["demo run"]}' ;;
-*) printf '%s\n' '{"plan":{"commands":[{"cmd":"true"}]}}' ;;
+*) cat >/dev/null; printf '%s\n' '{"plan":{"commands":[{"cmd":"true"}]}}' ;;
 esac"#,
     );
     let out = f
@@ -540,4 +540,24 @@ esac"#,
     assert!(!out.status.success(), "{err}");
     assert!(err.contains("ws\\nFORGED"), "{err}");
     assert!(!err.lines().any(|line| line.starts_with("FORGED")), "{err}");
+}
+
+#[test]
+fn a_plugin_that_answers_without_reading_its_request_still_answers() {
+    let f = Fixture::new(true);
+    script(
+        &f.data.join("plugins/meta-quick"),
+        r#"case "$1" in
+--meta-plugin-info) printf '%s\n' '{"name":"quick","version":"1","commands":["quick go"]}' ;;
+*) echo answered ;;
+esac"#,
+    );
+    // the plugin may exit before meta has written its request
+    for _ in 0..20 {
+        let out = f.run(&["quick", "go"]);
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(out.status.success(), "{text}");
+        assert!(text.contains("answered"), "{text}");
+    }
 }

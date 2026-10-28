@@ -371,10 +371,19 @@ impl SubprocessPluginManager {
             .spawn()
             .with_context(|| format!("Failed to execute plugin {}", escape_path(&plugin.path)))?;
 
-        // Send request to plugin's stdin
+        // Send request to plugin's stdin. A plugin may answer without
+        // reading it; then its output and exit status decide, not the pipe.
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(request_json.as_bytes())?;
+            match stdin.write_all(request_json.as_bytes()) {
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                result => result.with_context(|| {
+                    format!(
+                        "Cannot send the request to plugin {}",
+                        escape_path(&plugin.path)
+                    )
+                })?,
+            }
         }
 
         let output = child.wait_with_output()?;

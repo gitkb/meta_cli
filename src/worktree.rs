@@ -101,7 +101,10 @@ pub fn set_tree(
     let mut tree: Vec<_> = members
         .iter()
         .find_map(|member| config::recorded_project(member))
-        .map(|dir| not_held(readable_tree(&dir, projects, 0), set_dir))
+        .map(|dir| {
+            let mut visited = std::collections::HashSet::new();
+            not_held(readable_tree(&dir, projects, &mut visited), set_dir)
+        })
         .unwrap_or_default();
     tree.extend(own);
     Ok(tree)
@@ -112,20 +115,21 @@ pub fn set_tree(
 fn readable_tree(
     dir: &Path,
     projects: &[meta_core::config::ProjectInfo],
-    depth: usize,
+    visited: &mut std::collections::HashSet<PathBuf>,
 ) -> Vec<meta_core::config::MetaTreeNode> {
     use meta_core::config;
     projects
         .iter()
         .map(|project| {
             let path = dir.join(&project.path);
-            let nested = (depth < 32)
-                .then(|| config::find_meta_config_in(&path).ok().flatten())
-                .flatten();
+            let nested = config::find_meta_config_in(&path).ok().flatten();
+            // each meta repo once, as `walk_projects` does: links can loop
+            let first_visit = visited.insert(path.canonicalize().unwrap_or_else(|_| path.clone()));
             let children = nested
                 .as_ref()
+                .filter(|_| first_visit)
                 .and_then(|(config, _)| config::parse_meta_config(config).ok())
-                .map(|(projects, _)| readable_tree(&path, &projects, depth + 1))
+                .map(|(projects, _)| readable_tree(&path, &projects, visited))
                 .unwrap_or_default();
             config::MetaTreeNode {
                 info: project.clone(),
@@ -178,13 +182,15 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
         match std::fs::metadata(entry.path().join(".git")) {
             Err(e) if e.kind() != std::io::ErrorKind::NotFound => return true,
             Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
-            // a checkout of a set kept inside `dir` (a workspace there with
-            // sets of its own, wherever its worktrees_dir puts them) is no
-            // sign that `dir` is a set
+            // a checkout of a set kept inside `dir` by a workspace inside
+            // `dir` (one there with sets of its own, wherever its
+            // worktrees_dir puts them) is no sign that `dir` is a set
             Ok(_)
                 if meta_core::config::recorded_set(entry.path())
-                    .is_some_and(|set| set.starts_with(&canonical_dir) && set != canonical_dir) => {
-            }
+                    .is_some_and(|set| set.starts_with(&canonical_dir) && set != canonical_dir)
+                    && meta_core::config::recorded_project(entry.path())
+                        .and_then(|project| project.canonicalize().ok())
+                        .is_some_and(|project| project.starts_with(&canonical_dir)) => {}
             // even one meta can no longer read: it was meta's. A checkout
             // whose git directory can't be found (moved, with relative paths)
             // may be meta's too: it is not taken for a plain clone
