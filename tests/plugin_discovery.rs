@@ -479,7 +479,7 @@ fn generated_help_keeps_a_plugins_values_on_their_lines() {
     script(
         &f.data.join("plugins/meta-odd"),
         r#"case "$1" in
---meta-plugin-info) echo '{"name":"odd","version":"1\u001b[2J","description":"d\nFORGED","commands":["odd x\u001b[2J\nFORGED"]}' ;;
+--meta-plugin-info) printf '%s\n' '{"name":"odd","version":"1\u001b[2J","description":"d\nFORGED","commands":["odd x\u001b[2J\nFORGED"]}' ;;
 *) exit 1 ;;
 esac"#,
     );

@@ -505,6 +505,29 @@ impl ArchiveFormat {
     }
 }
 
+/// No release of `shorthand` was found at any of `tried` URLs. Each value
+/// comes from the user or the network, so each stays on its line.
+fn release_not_found(
+    shorthand: &GitHubShorthand,
+    tried: usize,
+    last_error: Option<anyhow::Error>,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
+        escape(&shorthand.user),
+        escape(&shorthand.repo),
+        shorthand
+            .version
+            .as_ref()
+            .map(|v| format!("@{}", escape(v)))
+            .unwrap_or_default(),
+        tried,
+        last_error
+            .map(|e| escape(&format!("{e:#}")).into_owned())
+            .unwrap_or_default()
+    )
+}
+
 /// Parsed GitHub shorthand: user/repo[@version]
 #[derive(Debug, Clone, PartialEq)]
 pub struct GitHubShorthand {
@@ -854,18 +877,7 @@ impl PluginInstaller {
         }
 
         // If we get here, none of the URLs worked
-        anyhow::bail!(
-            "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
-            shorthand.user,
-            shorthand.repo,
-            shorthand
-                .version
-                .as_ref()
-                .map(|v| format!("@{v}"))
-                .unwrap_or_default(),
-            urls.len(),
-            last_error.unwrap()
-        )
+        Err(release_not_found(shorthand, urls.len(), last_error))
     }
 
     /// Construct possible GitHub release URLs for a shorthand
@@ -1234,6 +1246,23 @@ impl PluginInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_releases_error_keeps_each_value_on_its_line() {
+        let shorthand = GitHubShorthand {
+            user: "o\nFORGED".to_string(),
+            repo: "r\u{1b}[2J".to_string(),
+            version: Some("v1\nFORGED".to_string()),
+        };
+        let message =
+            release_not_found(&shorthand, 2, Some(anyhow::anyhow!("e\nFORGED"))).to_string();
+        assert_eq!(message.lines().count(), 2, "{message}");
+        assert!(!message.contains('\u{1b}'), "{message}");
+        assert!(
+            message.starts_with("Could not find release for o\\nFORGED/"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn test_registry_config_default() {

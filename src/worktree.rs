@@ -85,6 +85,49 @@ pub fn set_config(
     }
 }
 
+/// The meta trees that describe the checkouts of the set at `set_dir`, whose
+/// config lists `projects`: the set's own nested configs, and those of the
+/// workspace the set was made from, for a nested meta repo the set doesn't
+/// hold (one skipped, say). The second is best effort: what neither tells
+/// about stays unselected. Returns (the workspace's, the set's).
+pub fn set_trees(
+    set_dir: &Path,
+    members: &[PathBuf],
+    projects: &[meta_core::config::ProjectInfo],
+) -> Result<(
+    Vec<meta_core::config::MetaTreeNode>,
+    Vec<meta_core::config::MetaTreeNode>,
+)> {
+    use meta_core::config;
+    let own = config::walk_projects(set_dir, projects, None)?;
+    let made_from = members
+        .iter()
+        .find_map(|member| config::recorded_project(member))
+        .and_then(|dir| config::walk_projects(&dir, projects, None).ok())
+        .map(|tree| not_held(tree, set_dir))
+        .unwrap_or_default();
+    Ok((made_from, own))
+}
+
+/// `nodes` without the projects of the nested meta repos whose config the
+/// set at `dir` holds: those the set's own tree describes.
+fn not_held(
+    nodes: Vec<meta_core::config::MetaTreeNode>,
+    dir: &Path,
+) -> Vec<meta_core::config::MetaTreeNode> {
+    nodes
+        .into_iter()
+        .map(|mut node| {
+            let place = dir.join(&node.info.path);
+            node.children = match meta_core::config::find_meta_config_in(&place) {
+                Ok(Some(_)) => Vec::new(),
+                _ => not_held(node.children, &place),
+            };
+            node
+        })
+        .collect()
+}
+
 /// Discover repos within a worktree task directory by scanning for .git files.
 /// Results are sorted by alias for deterministic output.
 pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {

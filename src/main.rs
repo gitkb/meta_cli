@@ -798,27 +798,19 @@ fn handle_command_dispatch(
 
                 // A set lays its repos out as the workspace: a checkout's path
                 // in the set is its project's path, nested meta repos included.
-                // Only a filter reads the nested configs.
+                // Only a filter reads the nested configs; the set's own copies
+                // win over the workspace's (see set_trees).
                 let filtered = cli.tag.is_some() || cli.include.is_some() || cli.exclude.is_some();
-                let tree = if filtered {
-                    config::walk_projects(&task_dir, &meta_projects, None)?
+                let (source_tree, tree) = if filtered {
+                    worktree::set_trees(&task_dir, &wt_paths, &meta_projects)?
                 } else {
-                    Vec::new()
+                    Default::default()
                 };
                 // Compared as directories: a project at a link in the set is
                 // the checkout where the link leads
                 let real = |path: &std::path::Path| {
                     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
                 };
-                // A nested meta repo the set doesn't hold (one skipped, say) is
-                // read where the set was made from; the set's own copy wins.
-                // Best effort: a repo neither tells about stays unselected.
-                let source_tree = wt_paths
-                    .iter()
-                    .filter(|_| filtered)
-                    .find_map(|path| config::recorded_project(path))
-                    .and_then(|dir| config::walk_projects(&dir, &meta_projects, None).ok())
-                    .unwrap_or_default();
                 let project_map: std::collections::HashMap<PathBuf, ProjectInfo> =
                     [&source_tree, &tree]
                         .into_iter()
