@@ -74,7 +74,7 @@ pub fn set_config(
     set_dir: &Path,
     members: &[PathBuf],
     config_name: Option<&PathBuf>,
-) -> Result<Option<(PathBuf, meta_core::config::ConfigFormat)>> {
+) -> Result<Option<PathBuf>> {
     use meta_core::config;
     if let Some(found) = config::meta_config_at(set_dir, config_name)? {
         return Ok(Some(found));
@@ -155,7 +155,7 @@ fn readable_tree(
             let children = nested
                 .as_ref()
                 .filter(|_| visited.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
-                .and_then(|(config, _)| config::parse_meta_config(config).ok())
+                .and_then(|config| config::parse_meta_config(config).ok())
                 .map(|(projects, _)| readable_tree(&path, &projects, visited))
                 .unwrap_or_default();
             config::MetaTreeNode {
@@ -578,7 +578,7 @@ mod recursive_tests {
         let config = |dir: &Path, projects: &str| {
             std::fs::create_dir_all(dir).unwrap();
             std::fs::write(
-                dir.join(".meta.json"),
+                dir.join(".meta.yaml"),
                 format!(r#"{{"projects": {{{projects}}}}}"#),
             )
             .unwrap();
@@ -586,7 +586,7 @@ mod recursive_tests {
         config(&workspace, r#""parent": {"repo": "x", "meta": true}"#);
         config(&workspace.join("parent"), r#""x": "x""#);
         let (projects, _) =
-            meta_core::config::parse_meta_config(&workspace.join(".meta.json")).unwrap();
+            meta_core::config::parse_meta_config(&workspace.join(".meta.yaml")).unwrap();
         let tree = meta_core::config::walk_projects(&workspace, &projects, None).unwrap();
 
         // the set doesn't hold parent: the workspace's config tells about x

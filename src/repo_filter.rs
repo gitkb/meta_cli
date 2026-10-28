@@ -4,7 +4,7 @@ use anyhow::{bail, Result};
 use meta_core::config::{MetaTreeNode, ProjectInfo};
 use std::path::{Component, Path, PathBuf};
 
-/// (`.meta` name, path from `meta_dir`) for `projects`, and for every project
+/// (`.meta.yaml` name, path from `meta_dir`) for `projects`, and for every project
 /// nested under `tree` (the result of walking the same meta root). Paths are
 /// in the same form as [`select`] gives the repos it chooses among.
 pub fn repo_names(
@@ -29,7 +29,7 @@ pub fn repo_names(
 
 /// The repos among `dirs` that `include` and `exclude` select, in order.
 ///
-/// A value names a repo by its `.meta` name (from `names`, see
+/// A value names a repo by its `.meta.yaml` name (from `names`, see
 /// [`repo_names`]) or by its whole path from `root` (`.` for the root; a
 /// trailing `/` is ignored), never by a part of either. A value starting with
 /// `./` is a path only. Repos are compared as directories, so excluding one
@@ -85,7 +85,7 @@ pub fn select(
         let value = meta_core::display::escape(value);
         if by_name.len() > 1 {
             bail!(
-                "{flag} '{value}' is the .meta name of the repos at {}; name one by its path, \
+                "{flag} '{value}' is the .meta.yaml name of the repos at {}; name one by its path, \
                  as ./<path>",
                 listed(&by_name)
             );
@@ -94,7 +94,7 @@ pub fn select(
             |repos: &[&Repo]| -> Vec<PathBuf> { repos.iter().map(|r| r.id.clone()).collect() };
         if !by_path.is_empty() && !by_name.is_empty() && ids(&by_path) != ids(&by_name) {
             bail!(
-                "{flag} '{value}' names the repo at {} by path and the repo at {} by .meta \
+                "{flag} '{value}' names the repo at {} by path and the repo at {} by .meta.yaml \
                  name; name the one you mean by its path, as ./<path>",
                 listed(&by_path),
                 listed(&by_name)
@@ -104,7 +104,7 @@ pub fn select(
         if hits.is_empty() {
             bail!(
                 "{flag} '{value}' names none of the repos this command runs in. Use a repo's \
-                 name from .meta or its path from the workspace root (`.` for the root), as \
+                 name from .meta.yaml or its path from the workspace root (`.` for the root), as \
                  `meta project list` shows it; in a worktree set, the same, from the set's root. --tag and \
                  --recursive change which repos the command runs in."
             );
@@ -358,7 +358,9 @@ mod tests {
         // `web` is one repo's path and another's name
         let err = select("web").unwrap_err().to_string();
         assert!(
-            err.contains("names the repo at web by path and the repo at frontend by .meta name"),
+            err.contains(
+                "names the repo at web by path and the repo at frontend by .meta.yaml name"
+            ),
             "{err}"
         );
     }
@@ -378,7 +380,7 @@ mod tests {
         let select = |value: &str| select(&strings(&[value]), &[], &dirs, &root, &names);
         let err = select("api").unwrap_err().to_string();
         assert!(
-            err.contains("is the .meta name of the repos at api, group/api"),
+            err.contains("is the .meta.yaml name of the repos at api, group/api"),
             "{err}"
         );
         // A ./ path picks one, with a relative root as with an absolute one

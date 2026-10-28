@@ -103,8 +103,8 @@ fn is_cache_valid(cached: &CachedContext, current_root: &PathBuf) -> bool {
 pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
-    let (config_path, _format) = config::find_meta_config(&cwd, None)?
-        .ok_or_else(|| anyhow::anyhow!("Not a meta workspace (no .meta config found)"))?;
+    let config_path = config::find_meta_config(&cwd, None)?
+        .ok_or_else(|| anyhow::anyhow!("Not a meta workspace (no .meta.yaml found)"))?;
 
     let meta_dir = config_path
         .parent()
@@ -309,7 +309,7 @@ fn build_dependency_map(projects: &[ProjectInfo]) -> Option<HashMap<String, Vec<
 
 // ── Markdown Formatting ─────────────────────────────────
 
-/// Text from `.meta`, git or the filesystem, made safe for this markdown,
+/// Text from `.meta.yaml`, git or the filesystem, made safe for this markdown,
 /// which agents read: control characters escaped, then `\` and `|` escaped
 /// so the value stays in its table cell.
 fn md(s: &str) -> String {

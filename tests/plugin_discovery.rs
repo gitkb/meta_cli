@@ -212,7 +212,7 @@ fn local_list_from_subdirectory_uses_real_path_and_binary_version() {
 #[test]
 fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
     let f = Fixture::new(true);
-    fs::write(f.cwd.join(".meta.json"), "{}").unwrap();
+    fs::write(f.cwd.join(".meta.yml"), "{}").unwrap();
     // Help still prints, with a warning; a command that needs the config fails
     for (args, works) in [
         (vec!["--help"], true),
@@ -223,11 +223,11 @@ fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
         let err = String::from_utf8_lossy(&output.stderr);
         assert!(err.contains("Multiple meta config files"), "{err}");
         assert!(
-            err.contains(".meta.json") && err.contains(".meta.yaml"),
+            err.contains(".meta.yml") && err.contains(".meta.yaml"),
             "{err}"
         );
     }
-    fs::remove_file(f.cwd.join(".meta.json")).unwrap();
+    fs::remove_file(f.cwd.join(".meta.yml")).unwrap();
     let output = f.run(&["--config", "absent\u{1b}\nFORGED", "exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -238,10 +238,7 @@ fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
     fs::remove_file(f.cwd.join(".meta.yaml")).unwrap();
     let output = f.run(&["exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        err.contains("'.meta / .meta.json / .meta.yaml / .meta.yml'"),
-        "{err}"
-    );
+    assert!(err.contains("'.meta.yaml / .meta.yml'"), "{err}");
 }
 
 #[test]
@@ -312,18 +309,9 @@ fn local_install_gitignores_untracked_plugin_files() {
 
 #[test]
 fn orphan_hint_names_actual_parent_config() {
-    for name in [".meta.json", ".meta.yml"] {
+    for name in [".meta.yaml", ".meta.yml"] {
         let f = Fixture::new(true);
-        let parent_config = f.home.join(name);
-        fs::write(
-            &parent_config,
-            if name.ends_with("json") {
-                "{\"projects\":{}}"
-            } else {
-                "projects: {}"
-            },
-        )
-        .unwrap();
+        fs::write(f.home.join(name), "projects: {}").unwrap();
         let output = f.run(&["--help"]);
         assert!(output.status.success());
         let err = String::from_utf8_lossy(&output.stderr);
@@ -340,12 +328,15 @@ fn orphan_hint_names_actual_parent_config() {
 }
 
 #[test]
-fn legacy_meta_config_file_means_no_project_plugins_without_a_warning() {
-    let f = Fixture::new(false);
-    fs::write(f.cwd.join(".meta"), "{\"projects\": {}}\n").unwrap();
-    let out = f.run(&["exec", "--", "true"]);
-    assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+fn old_config_names_are_not_a_workspace() {
+    for name in [".meta", ".meta.json"] {
+        let f = Fixture::new(false);
+        fs::write(f.cwd.join(name), "{\"projects\": {}}\n").unwrap();
+        let out = f.run(&["exec", "--", "true"]);
+        assert!(!out.status.success(), "{name}");
+        let err = String::from_utf8_lossy(&out.stderr);
+        assert!(err.contains("Could not find meta config file"), "{err}");
+    }
 }
 
 #[test]
