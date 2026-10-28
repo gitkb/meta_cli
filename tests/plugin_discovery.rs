@@ -322,6 +322,20 @@ fn old_config_names_are_not_a_workspace() {
 }
 
 #[test]
+fn a_meta_file_where_the_folder_goes_is_not_taken_for_no_plugins() {
+    let f = Fixture::new(true);
+    fs::write(f.cwd.join(".meta"), "{}\n").unwrap();
+    let out = f.run(&["--help"]);
+    assert!(out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Cannot read plugins directory"), "{err}");
+    let out = f.run(&["plugin", "list", "--local"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Failed to read manifest"), "{err}");
+}
+
+#[test]
 fn unreadable_plugin_directory_warns_and_help_still_runs() {
     // Root can read mode-000 directories, so this case cannot be exercised there.
     if unsafe { libc::geteuid() } == 0 {
