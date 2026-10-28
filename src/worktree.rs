@@ -132,7 +132,12 @@ fn not_held(
 /// have no record; plain clones (a `.git` directory, or a link to one) are
 /// not looked inside.
 pub fn holds_meta_checkout(dir: &Path) -> bool {
-    let mut walk = walkdir::WalkDir::new(dir).follow_links(false).into_iter();
+    // Where discovery looks: not in `.git`, nor in the sets of a workspace
+    // that is itself under `.worktrees` (its own nested `.worktrees`)
+    let mut walk = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || ScannedDirs::searched(entry.path()));
     while let Some(entry) = walk.next() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_dir() {

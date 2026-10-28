@@ -1053,7 +1053,8 @@ impl PluginInstaller {
                 // Require one filename component on both Unix and Windows.
                 anyhow::ensure!(
                     !file_name.contains(['/', '\\']),
-                    "ZIP plugin entry must be a top-level filename: {file_name}"
+                    "ZIP plugin entry must be a top-level filename: {}",
+                    escape(&file_name)
                 );
                 entries.push((i, file_name));
             }
