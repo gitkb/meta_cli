@@ -79,10 +79,40 @@ pub fn set_config(
     if let Some(found) = config::meta_config_at(set_dir, config_name)? {
         return Ok(Some(found));
     }
-    match members.iter().find_map(|m| config::recorded_project(m)) {
+    match set_origin(set_dir, members)? {
         Some(source) => config::meta_config_at(&source, config_name),
         None => config::find_meta_config(set_dir, config_name),
     }
+}
+
+/// The workspace meta recorded the set at `set_dir` was made from, by the
+/// members whose record names this set (another set's checkout moved in
+/// doesn't count). Members that name different workspaces are an error.
+fn set_origin(set_dir: &Path, members: &[PathBuf]) -> Result<Option<PathBuf>> {
+    use meta_core::config;
+    let set = set_dir
+        .canonicalize()
+        .unwrap_or_else(|_| set_dir.to_path_buf());
+    let mut origin: Option<PathBuf> = None;
+    for member in members {
+        if config::recorded_set(member).as_ref() != Some(&set) {
+            continue;
+        }
+        let Some(project) = config::recorded_project(member) else {
+            continue;
+        };
+        match &origin {
+            Some(first) if *first != project => anyhow::bail!(
+                "The checkouts of worktree set {} name different workspaces ({} and {}); \
+                 meta can't tell which config describes them",
+                escape_path(set_dir),
+                escape_path(first),
+                escape_path(&project)
+            ),
+            _ => origin = Some(project),
+        }
+    }
+    Ok(origin)
 }
 
 /// The meta tree that describes the checkouts of the set at `set_dir`, whose
@@ -98,9 +128,7 @@ pub fn set_tree(
 ) -> Result<Vec<meta_core::config::MetaTreeNode>> {
     use meta_core::config;
     let own = config::walk_projects(set_dir, projects, None)?;
-    let mut tree: Vec<_> = members
-        .iter()
-        .find_map(|member| config::recorded_project(member))
+    let mut tree: Vec<_> = set_origin(set_dir, members)?
         .map(|dir| {
             let mut visited = std::collections::HashSet::new();
             not_held(readable_tree(&dir, projects, &mut visited), set_dir)
@@ -124,10 +152,9 @@ fn readable_tree(
             let path = dir.join(&project.path);
             let nested = config::find_meta_config_in(&path).ok().flatten();
             // each meta repo once, as `walk_projects` does: links can loop
-            let first_visit = visited.insert(path.canonicalize().unwrap_or_else(|_| path.clone()));
             let children = nested
                 .as_ref()
-                .filter(|_| first_visit)
+                .filter(|_| visited.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
                 .and_then(|(config, _)| config::parse_meta_config(config).ok())
                 .map(|(projects, _)| readable_tree(&path, &projects, visited))
                 .unwrap_or_default();
