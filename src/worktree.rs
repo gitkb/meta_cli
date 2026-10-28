@@ -101,11 +101,39 @@ pub fn set_tree(
     let mut tree: Vec<_> = members
         .iter()
         .find_map(|member| config::recorded_project(member))
-        .and_then(|dir| config::walk_projects(&dir, projects, None).ok())
-        .map(|tree| not_held(tree, set_dir))
+        .map(|dir| not_held(readable_tree(&dir, projects, 0), set_dir))
         .unwrap_or_default();
     tree.extend(own);
     Ok(tree)
+}
+
+/// The meta tree of `projects` in `dir`, passing over each nested config
+/// that can't be read: one broken config loses only its own projects.
+fn readable_tree(
+    dir: &Path,
+    projects: &[meta_core::config::ProjectInfo],
+    depth: usize,
+) -> Vec<meta_core::config::MetaTreeNode> {
+    use meta_core::config;
+    projects
+        .iter()
+        .map(|project| {
+            let path = dir.join(&project.path);
+            let nested = (depth < 32)
+                .then(|| config::find_meta_config_in(&path).ok().flatten())
+                .flatten();
+            let children = nested
+                .as_ref()
+                .and_then(|(config, _)| config::parse_meta_config(config).ok())
+                .map(|(projects, _)| readable_tree(&path, &projects, depth + 1))
+                .unwrap_or_default();
+            config::MetaTreeNode {
+                info: project.clone(),
+                is_meta: nested.is_some(),
+                children,
+            }
+        })
+        .collect()
 }
 
 /// `nodes` without the projects of the nested meta repos whose config the
@@ -128,11 +156,13 @@ fn not_held(
 }
 
 /// Whether a checkout meta made for a set (a linked worktree with meta's
-/// record, readable or not, or one whose git directory can't be found) is
-/// under `dir`, as in a set moved by hand. Other tools' worktrees
+/// record, readable or not, or one whose git directory can't be found) may
+/// be under `dir`, as in a set moved by hand; a part of `dir` that can't be
+/// read may hold one too. Other tools' worktrees
 /// have no record; plain clones (a `.git` directory, or a link to one) are
 /// not looked inside.
 pub fn holds_meta_checkout(dir: &Path) -> bool {
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
     // Where discovery looks: not in `.git`, nor in the sets of a workspace
     // that is itself under `.worktrees` (its own nested `.worktrees`)
     let mut walk = walkdir::WalkDir::new(dir)
@@ -140,12 +170,21 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
         .into_iter()
         .filter_entry(|entry| entry.depth() == 0 || ScannedDirs::searched(entry.path()));
     while let Some(entry) = walk.next() {
-        let Ok(entry) = entry else { continue };
+        // What can't be read may hold one: can't tell is no plain clone
+        let Ok(entry) = entry else { return true };
         if !entry.file_type().is_dir() {
             continue;
         }
         match std::fs::metadata(entry.path().join(".git")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return true,
             Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
+            // a checkout of a set kept inside `dir` (a workspace there with
+            // sets of its own, wherever its worktrees_dir puts them) is no
+            // sign that `dir` is a set
+            Ok(_)
+                if meta_core::config::recorded_set(entry.path())
+                    .is_some_and(|set| set.starts_with(&canonical_dir) && set != canonical_dir) => {
+            }
             // even one meta can no longer read: it was meta's. A checkout
             // whose git directory can't be found (moved, with relative paths)
             // may be meta's too: it is not taken for a plain clone
