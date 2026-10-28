@@ -128,7 +128,7 @@ fn not_held(
 }
 
 /// Whether a checkout meta made for a set (a linked worktree with meta's
-/// record) is under `dir`, as in a set moved by hand. Other tools' worktrees
+/// record, readable or not) is under `dir`, as in a set moved by hand. Other tools' worktrees
 /// have no record; plain clones (a `.git` directory, or a link to one) are
 /// not looked inside.
 pub fn holds_meta_checkout(dir: &Path) -> bool {
@@ -140,7 +140,8 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
         }
         match std::fs::metadata(entry.path().join(".git")) {
             Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
-            Ok(_) if meta_core::config::recorded_project(entry.path()).is_some() => return true,
+            // even one meta can no longer read: it was meta's
+            Ok(_) if meta_core::config::has_worktree_record(entry.path()) => return true,
             _ => {}
         }
     }
@@ -352,8 +353,14 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
             count < 2_000_000,
             "Recursive worktree discovery exceeded 2000000 entries"
         );
-        let entry =
-            entry.with_context(|| format!("Cannot scan worktree {}", escape_path(task_dir)))?;
+        // walkdir's error names the path it failed on: kept on one line
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot scan worktree {}: {}",
+                escape_path(task_dir),
+                escape(&e.to_string())
+            )
+        })?;
         if !entry.file_type().is_dir() {
             continue;
         }
