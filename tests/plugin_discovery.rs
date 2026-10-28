@@ -472,3 +472,26 @@ fn sleeping_probe_times_out_and_reaps_plugin() {
 fn exited_wrapper_with_background_stdout_times_out_and_kills_descendant() {
     timeout_case(true);
 }
+
+#[test]
+fn generated_help_keeps_a_plugins_values_on_their_lines() {
+    let f = Fixture::new(true);
+    script(
+        &f.data.join("plugins/meta-odd"),
+        r#"case "$1" in
+--meta-plugin-info) echo '{"name":"odd","version":"1\u001b[2J","description":"d\nFORGED","commands":["odd x\u001b[2J\nFORGED"]}' ;;
+*) exit 1 ;;
+esac"#,
+    );
+    for args in [&["--help"][..], &["odd", "--help"][..]] {
+        let out = f.run(args);
+        let text = String::from_utf8_lossy(&out.stdout).to_string()
+            + &String::from_utf8_lossy(&out.stderr);
+        assert!(!text.contains('\u{1b}'), "{args:?}: {text}");
+        assert!(
+            !text.lines().any(|line| line.starts_with("FORGED")),
+            "{args:?}: {text}"
+        );
+        assert!(text.contains("odd"), "{args:?}: {text}");
+    }
+}

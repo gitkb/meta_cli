@@ -313,8 +313,13 @@ fn write_help_with_plugin_commands(
         None,
     ));
 
-    // Render commands section
+    // Render commands section; plugins name and describe their own commands,
+    // so each value stays on its line
     writeln!(w, "Commands:")?;
+    let commands: Vec<_> = commands
+        .iter()
+        .map(|(name, desc, plugin)| (escape(name), escape(desc), plugin.as_deref().map(escape)))
+        .collect();
     let max_name_len = commands.iter().map(|c| c.0.len()).max().unwrap_or(10);
     for (name, desc, plugin_opt) in &commands {
         let suffix = plugin_opt
@@ -805,9 +810,19 @@ fn handle_command_dispatch(
                 let real = |path: &std::path::Path| {
                     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
                 };
+                // A nested meta repo the set doesn't hold (one skipped, say) is
+                // read where the set was made from; the set's own copy wins.
+                // Best effort: a repo neither tells about stays unselected.
+                let source_tree = wt_paths
+                    .iter()
+                    .filter(|_| filtered)
+                    .find_map(|path| config::recorded_project(path))
+                    .and_then(|dir| config::walk_projects(&dir, &meta_projects, None).ok())
+                    .unwrap_or_default();
                 let project_map: std::collections::HashMap<PathBuf, ProjectInfo> =
-                    config::build_project_map(&tree, &task_dir, "")
+                    [&source_tree, &tree]
                         .into_iter()
+                        .flat_map(|tree| config::build_project_map(tree, &task_dir, ""))
                         .map(|(place, (_, info))| (real(&task_dir.join(place)), info))
                         .collect();
 
@@ -819,7 +834,8 @@ fn handle_command_dispatch(
                             if let Some(info) = project_map.get(&real(path)) {
                                 matches_tag_filter(&info.tags, tag_filter)
                             } else {
-                                true // Unknown projects pass through
+                                // As in the workspace, only the root runs without a project
+                                real(path) == real(&task_dir)
                             }
                         } else {
                             true
@@ -830,7 +846,10 @@ fn handle_command_dispatch(
 
                 // Selected by project name or by its path in the set
                 let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
-                    repo_filter::repo_names(&task_dir, &meta_projects, &tree)
+                    let mut names =
+                        repo_filter::repo_names(&task_dir, &meta_projects, &source_tree);
+                    names.extend(repo_filter::repo_names(&task_dir, &meta_projects, &tree));
+                    names
                 })?;
 
                 if wt_directories.is_empty() {

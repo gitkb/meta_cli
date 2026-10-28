@@ -685,9 +685,10 @@ impl SubprocessPluginManager {
     fn generate_fallback_help(&self, plugin: &SubprocessPlugin) -> String {
         let info = &plugin.info;
         let mut help = String::new();
-        let name = &info.name;
-        let version = &info.version;
-        let description = info.description.as_deref().unwrap_or("Meta CLI plugin");
+        // Every value comes from the plugin: each stays on its line
+        let name = escape(&info.name);
+        let version = escape(&info.version);
+        let description = escape(info.description.as_deref().unwrap_or("Meta CLI plugin"));
 
         // Header
         help.push_str(&format!("meta-{name} v{version} - {description}\n\n"));
@@ -695,14 +696,15 @@ impl SubprocessPluginManager {
         // If plugin has structured help, use it
         if let Some(ref plugin_help) = info.help {
             help.push_str("USAGE:\n");
-            let usage = &plugin_help.usage;
+            let usage = escape(&plugin_help.usage);
             help.push_str(&format!("    {usage}\n\n"));
 
             // Use command_sections if present, otherwise fall back to flat commands
             if !plugin_help.command_sections.is_empty() {
                 for (section_title, commands) in &plugin_help.command_sections {
-                    help.push_str(&format!("{section_title}:\n"));
+                    help.push_str(&format!("{}:\n", escape(section_title)));
                     for (cmd, desc) in commands {
+                        let (cmd, desc) = (escape(cmd), escape(desc));
                         help.push_str(&format!("    {cmd:<16} {desc}\n"));
                     }
                     help.push('\n');
@@ -712,6 +714,7 @@ impl SubprocessPluginManager {
                 let mut cmds: Vec<_> = plugin_help.commands.iter().collect();
                 cmds.sort_by(|a, b| a.0.cmp(b.0));
                 for (cmd, desc) in cmds {
+                    let (cmd, desc) = (escape(cmd), escape(desc));
                     help.push_str(&format!("    {cmd:<16} {desc}\n"));
                 }
                 help.push('\n');
@@ -720,13 +723,13 @@ impl SubprocessPluginManager {
             if !plugin_help.examples.is_empty() {
                 help.push_str("EXAMPLES:\n");
                 for example in &plugin_help.examples {
-                    help.push_str(&format!("    {example}\n"));
+                    help.push_str(&format!("    {}\n", escape(example)));
                 }
                 help.push('\n');
             }
 
             if let Some(ref note) = plugin_help.note {
-                help.push_str(&format!("NOTE:\n    {note}\n"));
+                help.push_str(&format!("NOTE:\n    {}\n", escape(note)));
             }
         } else {
             // Basic fallback from command list
@@ -735,10 +738,10 @@ impl SubprocessPluginManager {
 
             if !info.commands.is_empty() {
                 help.push_str("COMMANDS:\n");
-                let prefix = format!("{name} ");
+                let prefix = format!("{} ", info.name);
                 for cmd in &info.commands {
                     // Strip "git " prefix for display
-                    let display_cmd = cmd.strip_prefix(&prefix).unwrap_or(cmd);
+                    let display_cmd = escape(cmd.strip_prefix(&prefix).unwrap_or(cmd));
                     help.push_str(&format!("    {display_cmd}\n"));
                 }
                 help.push('\n');
