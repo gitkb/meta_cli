@@ -128,7 +128,8 @@ fn not_held(
 }
 
 /// Whether a checkout meta made for a set (a linked worktree with meta's
-/// record, readable or not) is under `dir`, as in a set moved by hand. Other tools' worktrees
+/// record, readable or not, or one whose git directory can't be found) is
+/// under `dir`, as in a set moved by hand. Other tools' worktrees
 /// have no record; plain clones (a `.git` directory, or a link to one) are
 /// not looked inside.
 pub fn holds_meta_checkout(dir: &Path) -> bool {
@@ -145,8 +146,16 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
         }
         match std::fs::metadata(entry.path().join(".git")) {
             Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
-            // even one meta can no longer read: it was meta's
-            Ok(_) if meta_core::config::has_worktree_record(entry.path()) => return true,
+            // even one meta can no longer read: it was meta's. A checkout
+            // whose git directory can't be found (moved, with relative paths)
+            // may be meta's too: it is not taken for a plain clone
+            Ok(_) => {
+                let reachable = meta_core::config::gitfile_target(entry.path())
+                    .is_some_and(|target| target.is_dir());
+                if !reachable || meta_core::config::has_worktree_record(entry.path()) {
+                    return true;
+                }
+            }
             _ => {}
         }
     }

@@ -24,13 +24,15 @@ pub fn escaped_error<P: clap::Parser>(
 }
 
 /// Parse `P` from this process's arguments, exiting on an error with
-/// [`escaped_error`] (help and version print as usual).
+/// [`escaped_error`] (help and version print as usual, and so does clap's
+/// invalid UTF-8 error, which doesn't echo the value).
 pub fn parse<P: clap::Parser>() -> P {
     use clap::error::ErrorKind;
     P::try_parse().unwrap_or_else(|e| match e.kind() {
         ErrorKind::DisplayHelp
         | ErrorKind::DisplayVersion
-        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand => e.exit(),
+        | ErrorKind::DisplayHelpOnMissingArgumentOrSubcommand
+        | ErrorKind::InvalidUtf8 => e.exit(),
         _ => escaped_error::<P>(std::env::args_os()).exit(),
     })
 }
