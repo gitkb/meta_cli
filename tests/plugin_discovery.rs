@@ -516,3 +516,28 @@ esac"#,
         "{text}"
     );
 }
+
+#[test]
+fn an_unreadable_plan_names_the_plugin_on_one_line() {
+    let f = Fixture::new(false);
+    // a workspace whose path holds a newline: the plugin's path does too
+    let cwd = f.cwd.join("ws\nFORGED");
+    fs::create_dir_all(&cwd).unwrap();
+    fs::write(cwd.join(".meta.yaml"), "projects: {}\n").unwrap();
+    script(
+        &cwd.join(".meta/plugins/meta-demo"),
+        r#"case "$1" in
+--meta-plugin-info) printf '%s\n' '{"name":"demo","version":"1","commands":["demo run"]}' ;;
+*) printf '%s\n' '{"plan":{"commands":[{"cmd":"true"}]}}' ;;
+esac"#,
+    );
+    let out = f
+        .command(&["demo", "run"])
+        .current_dir(&cwd)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success(), "{err}");
+    assert!(err.contains("ws\\nFORGED"), "{err}");
+    assert!(!err.lines().any(|line| line.starts_with("FORGED")), "{err}");
+}

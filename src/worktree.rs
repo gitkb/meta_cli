@@ -150,9 +150,15 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
             // whose git directory can't be found (moved, with relative paths)
             // may be meta's too: it is not taken for a plain clone
             Ok(_) => {
-                let reachable = meta_core::config::gitfile_target(entry.path())
-                    .is_some_and(|target| target.is_dir());
-                if !reachable || meta_core::config::has_worktree_record(entry.path()) {
+                let meta_made =
+                    meta_core::config::gitfile_target(entry.path()).is_none_or(|admin| {
+                        !admin.is_dir()
+                            || admin
+                                .join(meta_core::config::WORKTREE_RECORD_FILE)
+                                .symlink_metadata()
+                                .is_ok()
+                    });
+                if meta_made {
                     return true;
                 }
             }

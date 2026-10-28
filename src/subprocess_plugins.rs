@@ -413,7 +413,7 @@ impl SubprocessPluginManager {
             Err(e) if is_plan => anyhow::bail!(
                 "plugin {} sent an execution plan this meta cannot read ({e}); \
                  upgrade the plugin to match this meta",
-                plugin.path.display()
+                escape_path(&plugin.path)
             ),
             Err(_) => {
                 // Not a plan - print output as-is
