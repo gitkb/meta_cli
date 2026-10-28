@@ -210,24 +210,8 @@ fn local_list_from_subdirectory_uses_real_path_and_binary_version() {
 }
 
 #[test]
-fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
+fn missing_config_errors_are_escaped() {
     let f = Fixture::new(true);
-    fs::write(f.cwd.join(".meta.yml"), "{}").unwrap();
-    // Help still prints, with a warning; a command that needs the config fails
-    for (args, works) in [
-        (vec!["--help"], true),
-        (vec!["plugin", "list", "--local"], false),
-    ] {
-        let output = f.run(&args);
-        assert_eq!(output.status.success(), works, "{args:?}");
-        let err = String::from_utf8_lossy(&output.stderr);
-        assert!(err.contains("Multiple meta config files"), "{err}");
-        assert!(
-            err.contains(".meta.yml") && err.contains(".meta.yaml"),
-            "{err}"
-        );
-    }
-    fs::remove_file(f.cwd.join(".meta.yml")).unwrap();
     let output = f.run(&["--config", "absent\u{1b}\nFORGED", "exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -238,7 +222,7 @@ fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
     fs::remove_file(f.cwd.join(".meta.yaml")).unwrap();
     let output = f.run(&["exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(err.contains("'.meta.yaml / .meta.yml'"), "{err}");
+    assert!(err.contains("'.meta.yaml'"), "{err}");
 }
 
 #[test]
@@ -309,27 +293,25 @@ fn local_install_gitignores_untracked_plugin_files() {
 
 #[test]
 fn orphan_hint_names_actual_parent_config() {
-    for name in [".meta.yaml", ".meta.yml"] {
-        let f = Fixture::new(true);
-        fs::write(f.home.join(name), "projects: {}").unwrap();
-        let output = f.run(&["--help"]);
-        assert!(output.status.success());
-        let err = String::from_utf8_lossy(&output.stderr);
-        // meta names the parent by its resolved path (/private/var on macOS)
-        let parent_config = f.home.canonicalize().unwrap().join(name);
-        assert!(
-            err.contains(&format!(
-                "To include it, add to {}:",
-                parent_config.display()
-            )),
-            "{err}"
-        );
-    }
+    let f = Fixture::new(true);
+    fs::write(f.home.join(".meta.yaml"), "projects: {}").unwrap();
+    let output = f.run(&["--help"]);
+    assert!(output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    // meta names the parent by its resolved path (/private/var on macOS)
+    let parent_config = f.home.canonicalize().unwrap().join(".meta.yaml");
+    assert!(
+        err.contains(&format!(
+            "To include it, add to {}:",
+            parent_config.display()
+        )),
+        "{err}"
+    );
 }
 
 #[test]
 fn old_config_names_are_not_a_workspace() {
-    for name in [".meta", ".meta.json"] {
+    for name in [".meta", ".meta.json", ".meta.yml"] {
         let f = Fixture::new(false);
         fs::write(f.cwd.join(name), "{\"projects\": {}}\n").unwrap();
         let out = f.run(&["exec", "--", "true"]);

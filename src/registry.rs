@@ -648,8 +648,8 @@ impl PluginInstaller {
     /// Find the nearest directory holding a config file (not a bare `.meta/`).
     fn find_workspace_root_from(start_dir: &Path) -> Result<PathBuf> {
         meta_core::config::nearest_meta_dir(start_dir)?.ok_or_else(|| anyhow::anyhow!(
-            "Not in a meta workspace.\nExpected to find a config file: {}.\nCreate one here (e.g. .meta.yaml), or cd into a workspace.",
-            meta_core::config::META_CONFIG_NAMES.join(", ")
+            "Not in a meta workspace.\nExpected to find {} here or in a folder above.\nCreate one here, or cd into a workspace.",
+            meta_core::config::META_CONFIG_NAME
         ))
     }
 

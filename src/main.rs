@@ -957,7 +957,7 @@ fn handle_command_dispatch(
                 .config
                 .as_ref()
                 .map(|p| escape_path(p))
-                .unwrap_or_else(|| config::META_CONFIG_NAMES.join(" / "));
+                .unwrap_or_else(|| config::META_CONFIG_NAME.to_string());
             eprintln!("Error: Could not find meta config file '{config_name}'");
             eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
@@ -1953,25 +1953,5 @@ projects:
         assert!(result.is_some());
         let found_path = result.unwrap();
         assert_eq!(found_path, meta_path);
-    }
-
-    #[test]
-    fn test_yaml_file_extensions() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Test .yaml extension
-        let yaml_path = dir.path().join(".meta.yaml");
-        std::fs::write(&yaml_path, "projects:\n  p1: git@test.git\n").unwrap();
-
-        let result = find_meta_config(dir.path(), None).unwrap();
-        assert!(result.is_some());
-
-        // Clean up and test .yml extension
-        std::fs::remove_file(&yaml_path).unwrap();
-        let yml_path = dir.path().join(".meta.yml");
-        std::fs::write(&yml_path, "projects:\n  p2: git@test.git\n").unwrap();
-
-        let result = find_meta_config(dir.path(), None).unwrap();
-        assert!(result.is_some());
     }
 }
