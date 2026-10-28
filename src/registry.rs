@@ -2135,6 +2135,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Not in a meta workspace"));
         assert!(err_msg.contains("Create one here"));
+        assert!(err_msg.contains(".meta.yaml"));
     }
 
     #[test]
