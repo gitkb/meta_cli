@@ -165,16 +165,6 @@ fn install_claude_integration_to(
     update: bool,
     verbose: bool,
 ) -> Result<()> {
-    // `.meta/` is meta's own folder, so it can't sit next to a legacy `.meta` config file
-    if target_dir.join(".meta").is_file() {
-        anyhow::bail!(
-            "This repo's meta config is the legacy `.meta` file, so meta can't create its \
-             `.meta/` folder for skills.\n\
-             Rename the config and rerun: `git mv .meta .meta.json` (same content), \
-             or convert it to `.meta.yaml`."
-        );
-    }
-
     let claude_dir = target_dir.join(".claude");
     let skills_dir = claude_dir.join("skills");
     let rules_dir = claude_dir.join("rules");
@@ -183,7 +173,7 @@ fn install_claude_integration_to(
     if config::find_meta_config_in(target_dir)?.is_none() {
         println!(
             "{}",
-            "Warning: No .meta config found in current directory.".yellow()
+            "Warning: No .meta.yaml found in current directory.".yellow()
         );
         println!("This integration is designed for meta repositories.");
         println!();
@@ -1191,20 +1181,6 @@ mod tests {
             assert_linked(dir.path(), ".cursor/skills", name);
         }
         assert!(!dir.path().join(".opencode").exists());
-    }
-
-    #[test]
-    fn test_install_refuses_legacy_meta_config_file() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
-
-        for (force, update) in [(false, false), (false, true), (true, false)] {
-            let err = install_claude_integration_to(dir.path(), force, update, false).unwrap_err();
-            assert!(err.to_string().contains("git mv .meta .meta.json"), "{err}");
-        }
-        assert!(dir.path().join(".meta").is_file());
-        assert!(!dir.path().join(".claude").exists());
-        assert!(!dir.path().join(".agents").exists());
     }
 
     #[test]

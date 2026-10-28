@@ -1,6 +1,6 @@
 //! Dependency tracking and impact analysis for meta projects
 //!
-//! Supports extended .meta schema with provides/depends_on fields:
+//! Supports extended .meta.yaml schema with provides/depends_on fields:
 //!
 //! ```yaml
 //! projects:

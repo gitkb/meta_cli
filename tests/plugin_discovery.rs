@@ -210,24 +210,8 @@ fn local_list_from_subdirectory_uses_real_path_and_binary_version() {
 }
 
 #[test]
-fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
+fn missing_config_errors_are_escaped() {
     let f = Fixture::new(true);
-    fs::write(f.cwd.join(".meta.json"), "{}").unwrap();
-    // Help still prints, with a warning; a command that needs the config fails
-    for (args, works) in [
-        (vec!["--help"], true),
-        (vec!["plugin", "list", "--local"], false),
-    ] {
-        let output = f.run(&args);
-        assert_eq!(output.status.success(), works, "{args:?}");
-        let err = String::from_utf8_lossy(&output.stderr);
-        assert!(err.contains("Multiple meta config files"), "{err}");
-        assert!(
-            err.contains(".meta.json") && err.contains(".meta.yaml"),
-            "{err}"
-        );
-    }
-    fs::remove_file(f.cwd.join(".meta.json")).unwrap();
     let output = f.run(&["--config", "absent\u{1b}\nFORGED", "exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
     assert!(
@@ -238,10 +222,7 @@ fn ambiguous_configs_and_explicit_config_errors_are_escaped() {
     fs::remove_file(f.cwd.join(".meta.yaml")).unwrap();
     let output = f.run(&["exec", "--", "true"]);
     let err = String::from_utf8_lossy(&output.stderr);
-    assert!(
-        err.contains("'.meta / .meta.json / .meta.yaml / .meta.yml'"),
-        "{err}"
-    );
+    assert!(err.contains("'.meta.yaml'"), "{err}");
 }
 
 #[test]
@@ -312,40 +293,49 @@ fn local_install_gitignores_untracked_plugin_files() {
 
 #[test]
 fn orphan_hint_names_actual_parent_config() {
-    for name in [".meta.json", ".meta.yml"] {
-        let f = Fixture::new(true);
-        let parent_config = f.home.join(name);
-        fs::write(
-            &parent_config,
-            if name.ends_with("json") {
-                "{\"projects\":{}}"
-            } else {
-                "projects: {}"
-            },
-        )
-        .unwrap();
-        let output = f.run(&["--help"]);
-        assert!(output.status.success());
-        let err = String::from_utf8_lossy(&output.stderr);
-        // meta names the parent by its resolved path (/private/var on macOS)
-        let parent_config = f.home.canonicalize().unwrap().join(name);
+    let f = Fixture::new(true);
+    fs::write(f.home.join(".meta.yaml"), "projects: {}").unwrap();
+    let output = f.run(&["--help"]);
+    assert!(output.status.success());
+    let err = String::from_utf8_lossy(&output.stderr);
+    // meta names the parent by its resolved path (/private/var on macOS)
+    let parent_config = f.home.canonicalize().unwrap().join(".meta.yaml");
+    assert!(
+        err.contains(&format!(
+            "To include it, add to {}:",
+            parent_config.display()
+        )),
+        "{err}"
+    );
+}
+
+#[test]
+fn old_config_names_are_not_a_workspace() {
+    for name in [".meta", ".meta.json", ".meta.yml"] {
+        let f = Fixture::new(false);
+        fs::write(f.cwd.join(name), "{\"projects\": {}}\n").unwrap();
+        let out = f.run(&["exec", "--", "true"]);
+        assert!(!out.status.success(), "{name}");
+        let err = String::from_utf8_lossy(&out.stderr);
         assert!(
-            err.contains(&format!(
-                "To include it, add to {}:",
-                parent_config.display()
-            )),
+            err.contains("Could not find meta config file '.meta.yaml'"),
             "{err}"
         );
     }
 }
 
 #[test]
-fn legacy_meta_config_file_means_no_project_plugins_without_a_warning() {
-    let f = Fixture::new(false);
-    fs::write(f.cwd.join(".meta"), "{\"projects\": {}}\n").unwrap();
-    let out = f.run(&["exec", "--", "true"]);
+fn a_meta_file_where_the_folder_goes_is_not_taken_for_no_plugins() {
+    let f = Fixture::new(true);
+    fs::write(f.cwd.join(".meta"), "{}\n").unwrap();
+    let out = f.run(&["--help"]);
     assert!(out.status.success());
-    assert_eq!(String::from_utf8_lossy(&out.stderr), "");
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Cannot read plugins directory"), "{err}");
+    let out = f.run(&["plugin", "list", "--local"]);
+    assert!(!out.status.success());
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(err.contains("Failed to read manifest"), "{err}");
 }
 
 #[test]

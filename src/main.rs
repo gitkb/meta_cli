@@ -2,9 +2,7 @@ use anyhow::Result;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use colored::*;
 use loop_lib::run;
-use meta_core::config::{
-    self, find_meta_config, parse_meta_config, ConfigFormat, MetaTreeNode, ProjectInfo,
-};
+use meta_core::config::{self, find_meta_config, parse_meta_config, MetaTreeNode, ProjectInfo};
 use meta_core::display::{escape, escape_lines, escape_path};
 use std::io::Write;
 use std::path::PathBuf;
@@ -48,7 +46,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Skip these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
+        help = "Skip these repos: each value is a repo's .meta.yaml name or its whole path from the workspace root (. for the root), never part of one"
     )]
     exclude: Option<Vec<String>>,
 
@@ -57,7 +55,7 @@ struct Cli {
         long,
         global = true,
         value_delimiter = ',',
-        help = "Only run in these repos: each value is a repo's .meta name or its whole path from the workspace root (. for the root), never part of one"
+        help = "Only run in these repos: each value is a repo's .meta.yaml name or its whole path from the workspace root (. for the root), never part of one"
     )]
     include: Option<Vec<String>>,
 
@@ -598,12 +596,14 @@ fn run_cli() -> Result<()> {
                 println!("Arguments:");
                 println!("  <COMMAND>...    Command and arguments to run");
                 println!();
-                println!("The command runs as typed in each project directory defined in .meta,");
+                println!(
+                    "The command runs as typed in each project directory defined in .meta.yaml,"
+                );
                 println!("never through a plugin (use `meta git ...` for the git plugin).");
                 println!("No shell parses it: each argument reaches the program as given, so");
                 println!("quotes, $(), ;, | and globs stay literal. For a shell, ask for one.");
                 println!();
-                println!("--include/--exclude take repos by .meta name or path from the root");
+                println!("--include/--exclude take repos by .meta.yaml name or path from the root");
                 println!("(. for the root), never part of a path.");
                 println!();
                 println!("Examples:");
@@ -712,7 +712,7 @@ fn handle_command_dispatch(
         log::debug!("parallel=false (--sequential flag)");
         false
     } else {
-        // Load default from .meta config (defaults to parallel: true if not specified)
+        // Load default from .meta.yaml (defaults to parallel: true if not specified)
         let cwd = std::env::current_dir().unwrap_or_default();
         let defaults = config::load_meta_defaults(&cwd);
         log::debug!(
@@ -725,8 +725,8 @@ fn handle_command_dispatch(
 
     let command_str = loop_lib::display_command(&command_args);
 
-    // Check if this is `git clone` - it doesn't require a .meta file because
-    // its purpose is to clone the repo that contains the .meta file
+    // Check if this is `git clone` - it doesn't require a .meta.yaml file because
+    // its purpose is to clone the repo that contains the .meta.yaml file
     let is_git_clone = command_args.first().map(|s| s == "git").unwrap_or(false)
         && command_args.get(1).map(|s| s == "clone").unwrap_or(false);
 
@@ -734,7 +734,7 @@ fn handle_command_dispatch(
         if cli.include.is_some() || cli.exclude.is_some() {
             anyhow::bail!("meta git clone clones every repo in the meta repo; it does not take --include/--exclude");
         }
-        // Handle git clone directly via plugin without requiring .meta file
+        // Handle git clone directly via plugin without requiring .meta.yaml file
         let subprocess_options = PluginRequestOptions {
             json_output: cli.json,
             verbose: cli.verbose,
@@ -792,7 +792,7 @@ fn handle_command_dispatch(
                 );
             }
 
-            if let Some((config_path, _format)) =
+            if let Some(config_path) =
                 worktree::set_config(&task_dir, &wt_paths, cli.config.as_ref())?
             {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
@@ -919,7 +919,7 @@ fn handle_command_dispatch(
             }
             if cli.verbose {
                 eprintln!(
-                    "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
+                    "{} No .meta.yaml found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
                     "warning:".yellow().bold(),
                     escape(&task_name)
                 );
@@ -951,13 +951,13 @@ fn handle_command_dispatch(
     }
 
     let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref())? {
-        Some((path, _format)) => path,
+        Some(path) => path,
         None => {
             let config_name = cli
                 .config
                 .as_ref()
                 .map(|p| escape_path(p))
-                .unwrap_or_else(|| config::META_CONFIG_NAMES.join(" / "));
+                .unwrap_or_else(|| config::META_CONFIG_NAME.to_string());
             eprintln!("Error: Could not find meta config file '{config_name}'");
             eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
@@ -1462,7 +1462,7 @@ fn matches_tag_filter(tags: &[String], filter: &str) -> bool {
 }
 
 /// The repos among `dirs` that `--include`/`--exclude` select (see
-/// [`repo_filter::select`]); `names` lists the `.meta` names they may use.
+/// [`repo_filter::select`]); `names` lists the `.meta.yaml` names they may use.
 fn select_repos(
     cli: &Cli,
     dirs: Vec<String>,
@@ -1512,8 +1512,8 @@ fn check_and_warn_orphan() {
         return;
     }
 
-    // Find the nearest .meta config
-    let Ok(Some((config_path, _))) = find_meta_config(&current_dir, None) else {
+    // Find the nearest .meta.yaml
+    let Ok(Some(config_path)) = find_meta_config(&current_dir, None) else {
         return;
     };
 
@@ -1536,24 +1536,13 @@ fn check_and_warn_orphan() {
         eprintln!("  Parent:  {}", escape_path(&warning.parent));
         eprintln!();
 
-        // Show format-appropriate syntax
         eprintln!(
             "  To include it, add to {}:",
             escape_path(&warning.parent_config)
         );
-        match warning.parent_format {
-            ConfigFormat::Json => {
-                eprintln!(
-                    "    \"{}\": {{ \"repo\": \"<git-url>\", \"meta\": true }}",
-                    escape(&warning.suggested_key)
-                );
-            }
-            ConfigFormat::Yaml => {
-                eprintln!("    {}:", escape(&warning.suggested_key));
-                eprintln!("      repo: <git-url>");
-                eprintln!("      meta: true");
-            }
-        }
+        eprintln!("    {}:", escape(&warning.suggested_key));
+        eprintln!("      repo: <git-url>");
+        eprintln!("      meta: true");
         eprintln!();
     }
 }
@@ -1741,24 +1730,13 @@ ignore:
     #[test]
     fn test_find_meta_config() {
         let dir = tempfile::tempdir().unwrap();
-        let meta_path = dir.path().join(".meta");
+        let meta_path = dir.path().join(".meta.yaml");
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
         let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
-        let (path, _format) = result.unwrap();
+        let path = result.unwrap();
         assert_eq!(path, meta_path);
-    }
-
-    #[test]
-    fn test_find_meta_config_rejects_ambiguity() {
-        let dir = tempfile::tempdir().unwrap();
-        std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
-        std::fs::write(dir.path().join(".meta.yaml"), "projects: {}").unwrap();
-        let err = find_meta_config(dir.path(), None).unwrap_err().to_string();
-        assert!(err.contains("Multiple meta config files"));
-        assert!(err.contains(".meta.yaml"));
-        assert!(err.contains(&escape_path(&dir.path().join(".meta"))));
     }
 
     #[test]
@@ -1819,11 +1797,11 @@ projects:
     #[test]
     fn test_discover_nested_projects_no_nested() {
         let dir = tempfile::tempdir().unwrap();
-        // Create a .meta with a project that has no nested .meta
+        // Create a .meta.yaml with a project that has no nested .meta.yaml
         let project_dir = dir.path().join("project1");
         std::fs::create_dir(&project_dir).unwrap();
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"project1": "git@github.com:org/project1.git"}}"#,
         )
         .unwrap();
@@ -1840,9 +1818,9 @@ projects:
 
         // Create nested structure:
         // root/
-        //   .meta (contains project1)
+        //   .meta.yaml (contains project1)
         //   project1/
-        //     .meta (contains subproject)
+        //     .meta.yaml (contains subproject)
         //     subproject/
 
         let project1_dir = dir.path().join("project1");
@@ -1850,12 +1828,12 @@ projects:
         std::fs::create_dir_all(&subproject_dir).unwrap();
 
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"project1": "git@github.com:org/project1.git"}}"#,
         )
         .unwrap();
         std::fs::write(
-            project1_dir.join(".meta"),
+            project1_dir.join(".meta.yaml"),
             r#"{"projects": {"subproject": "git@github.com:org/subproject.git"}}"#,
         )
         .unwrap();
@@ -1877,17 +1855,17 @@ projects:
         std::fs::create_dir_all(&level2).unwrap();
 
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{"projects": {"level1": "git@github.com:org/level1.git"}}"#,
         )
         .unwrap();
         std::fs::write(
-            level1.join(".meta"),
+            level1.join(".meta.yaml"),
             r#"{"projects": {"level2": "git@github.com:org/level2.git"}}"#,
         )
         .unwrap();
 
-        // depth 0: no recursion into nested .meta
+        // depth 0: no recursion into nested .meta.yaml
         let tree_0 = config::walk_meta_tree(dir.path(), Some(0)).unwrap();
         let paths_0 = config::flatten_meta_tree(&tree_0);
         assert_eq!(paths_0, vec!["level1"]);
@@ -1909,7 +1887,7 @@ projects:
         std::fs::create_dir_all(&backend_dir).unwrap();
 
         std::fs::write(
-            dir.path().join(".meta"),
+            dir.path().join(".meta.yaml"),
             r#"{
                 "projects": {
                     "frontend": {
@@ -1935,39 +1913,9 @@ projects:
     }
 
     #[test]
-    fn test_mixed_json_yaml_format() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Test that we can parse both JSON and YAML in different locations
-        let json_meta = dir.path().join(".meta");
-        std::fs::write(
-            &json_meta,
-            r#"{"projects": {"project1": "git@github.com:org/p1.git"}}"#,
-        )
-        .unwrap();
-
-        let (projects, _) = parse_meta_config(&json_meta).unwrap();
-        assert_eq!(projects.len(), 1);
-        assert_eq!(projects[0].name, "project1");
-
-        // YAML version
-        let yaml_dir = tempfile::tempdir().unwrap();
-        let yaml_meta = yaml_dir.path().join("config.yaml");
-        std::fs::write(
-            &yaml_meta,
-            "projects:\n  project2: git@github.com:org/p2.git\n",
-        )
-        .unwrap();
-
-        let (yaml_projects, _) = parse_meta_config(&yaml_meta).unwrap();
-        assert_eq!(yaml_projects.len(), 1);
-        assert_eq!(yaml_projects[0].name, "project2");
-    }
-
-    #[test]
     fn test_extended_format_with_optional_path() {
         let dir = tempfile::tempdir().unwrap();
-        let meta_path = dir.path().join(".meta");
+        let meta_path = dir.path().join(".meta.yaml");
 
         // Extended format without explicit path (should default to project name)
         std::fs::write(
@@ -1996,34 +1944,14 @@ projects:
         let nested = dir.path().join("a").join("b").join("c");
         std::fs::create_dir_all(&nested).unwrap();
 
-        // Create .meta at root
-        let meta_path = dir.path().join(".meta");
+        // Create .meta.yaml at root
+        let meta_path = dir.path().join(".meta.yaml");
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
-        // Search from nested directory should find root .meta
+        // Search from nested directory should find root .meta.yaml
         let result = find_meta_config(&nested, None).unwrap();
         assert!(result.is_some());
-        let (found_path, _) = result.unwrap();
+        let found_path = result.unwrap();
         assert_eq!(found_path, meta_path);
-    }
-
-    #[test]
-    fn test_yaml_file_extensions() {
-        let dir = tempfile::tempdir().unwrap();
-
-        // Test .yaml extension
-        let yaml_path = dir.path().join(".meta.yaml");
-        std::fs::write(&yaml_path, "projects:\n  p1: git@test.git\n").unwrap();
-
-        let result = find_meta_config(dir.path(), None).unwrap();
-        assert!(result.is_some());
-
-        // Clean up and test .yml extension
-        std::fs::remove_file(&yaml_path).unwrap();
-        let yml_path = dir.path().join(".meta.yml");
-        std::fs::write(&yml_path, "projects:\n  p2: git@test.git\n").unwrap();
-
-        let result = find_meta_config(dir.path(), None).unwrap();
-        assert!(result.is_some());
     }
 }

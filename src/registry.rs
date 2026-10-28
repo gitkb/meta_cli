@@ -115,20 +115,11 @@ pub enum InstallScope {
     // Future: Custom(PathBuf) for --path flag in M5
 }
 
-/// Whether `e` means the path does not exist: not found, or a part of it
-/// that is a file (`.meta/plugins` where `.meta` is the config file).
-fn missing(e: &std::io::Error) -> bool {
-    matches!(
-        e.kind(),
-        std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-    )
-}
-
 impl PluginManifest {
     /// Load manifest from file, or return empty manifest if not found
     pub fn load(manifest_path: &Path) -> Result<Self> {
         let content = match std::fs::read_to_string(manifest_path) {
-            Err(e) if missing(&e) => return Ok(Self::default()),
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Self::default()),
             result => result.with_context(|| {
                 format!(
                     "Failed to read manifest from {}",
@@ -657,8 +648,8 @@ impl PluginInstaller {
     /// Find the nearest directory holding a config file (not a bare `.meta/`).
     fn find_workspace_root_from(start_dir: &Path) -> Result<PathBuf> {
         meta_core::config::nearest_meta_dir(start_dir)?.ok_or_else(|| anyhow::anyhow!(
-            "Not in a meta workspace.\nExpected to find a config file: {}.\nCreate one here (e.g. .meta.yaml), or cd into a workspace.",
-            meta_core::config::META_CONFIG_NAMES.join(", ")
+            "Not in a meta workspace.\nExpected to find {} here or in a folder above.\nCreate one here, or cd into a workspace.",
+            meta_core::config::META_CONFIG_NAME
         ))
     }
 
@@ -2134,21 +2125,6 @@ mod tests {
     }
 
     #[test]
-    fn test_find_workspace_root_with_legacy_meta_file() {
-        let temp = tempfile::tempdir().unwrap();
-        std::fs::write(temp.path().join(".meta"), r#"{"projects":{}}"#).unwrap();
-
-        let result = PluginInstaller::find_workspace_root_from(temp.path());
-
-        assert!(result.is_ok());
-        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
-        assert_eq!(
-            result.unwrap().canonicalize().unwrap(),
-            temp.path().canonicalize().unwrap()
-        );
-    }
-
-    #[test]
     fn test_find_workspace_root_fails_outside_workspace() {
         let temp = tempfile::tempdir().unwrap();
 
@@ -2159,6 +2135,7 @@ mod tests {
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Not in a meta workspace"));
         assert!(err_msg.contains("Create one here"));
+        assert!(err_msg.contains(".meta.yaml"));
     }
 
     #[test]

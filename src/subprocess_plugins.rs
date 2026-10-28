@@ -187,15 +187,7 @@ impl SubprocessPluginManager {
 
         let entries = match std::fs::read_dir(dir) {
             Ok(entries) => entries,
-            // A legacy `.meta` config file in place of the `.meta/` folder means no plugins
-            Err(e)
-                if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
-                ) =>
-            {
-                return Ok(())
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(()),
             Err(e) => {
                 eprintln!(
                     "Warning: Cannot read plugins directory {}: {}; skipping",

@@ -10,7 +10,7 @@ use tempfile::tempdir;
 /// `touch` and logs each request it receives instead of running it.
 fn workspace(root: &Path) {
     fs::write(
-        root.join(".meta"),
+        root.join(".meta.yaml"),
         r#"{"projects":{"a":"https://example.invalid/a.git","b":"https://example.invalid/b.git"}}"#,
     )
     .unwrap();

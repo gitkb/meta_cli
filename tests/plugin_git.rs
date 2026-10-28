@@ -289,7 +289,7 @@ use std::process::Command;
 #[test]
 fn test_meta_git_clone_invalid_repo() {
     let dir = tempdir().unwrap();
-    let meta_path = dir.path().join(".meta");
+    let meta_path = dir.path().join(".meta.yaml");
     fs::write(
         &meta_path,
         r#"{
@@ -314,7 +314,7 @@ fn test_meta_git_clone_invalid_repo() {
 #[test]
 fn test_meta_dry_run_flag() {
     let dir = tempdir().unwrap();
-    let meta_path = dir.path().join(".meta");
+    let meta_path = dir.path().join(".meta.yaml");
     fs::write(
         &meta_path,
         r#"{
@@ -344,8 +344,8 @@ fn malformed_worktree_membership_is_reported_before_dispatch() {
     let root = temp.path().canonicalize().unwrap();
     let worktree = root.join(".worktrees/broken");
     fs::create_dir_all(&worktree).unwrap();
-    fs::write(root.join(".meta"), r#"{"projects":{}}"#).unwrap();
-    fs::write(worktree.join(".meta"), r#"{"projects":{}}"#).unwrap();
+    fs::write(root.join(".meta.yaml"), r#"{"projects":{}}"#).unwrap();
+    fs::write(worktree.join(".meta.yaml"), r#"{"projects":{}}"#).unwrap();
     fs::write(worktree.join(".git"), "malformed metadata").unwrap();
     let marker = root.join("unexpected-dispatch");
     let output = std::process::Command::new(env!("CARGO_BIN_EXE_meta"))
