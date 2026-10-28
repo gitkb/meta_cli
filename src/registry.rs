@@ -6,7 +6,7 @@
 
 use anyhow::{Context, Result};
 use log::{debug, info};
-use meta_core::display::escape_path;
+use meta_core::display::{escape, escape_path};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::io::Read;
@@ -327,7 +327,7 @@ impl RegistryClient {
             }
         }
 
-        anyhow::bail!("Plugin '{name}' not found in any registry")
+        anyhow::bail!("Plugin '{}' not found in any registry", escape(name))
     }
 
     /// Fetch plugin metadata (complex registry format)
@@ -347,7 +347,7 @@ impl RegistryClient {
             }
         }
 
-        anyhow::bail!("Plugin '{name}' not found in any registry")
+        anyhow::bail!("Plugin '{}' not found in any registry", escape(name))
     }
 
     /// Search for plugins matching a query
@@ -371,7 +371,7 @@ impl RegistryClient {
     fn fetch_json<T: serde::de::DeserializeOwned>(&self, url: &str) -> Result<T> {
         let response = ureq::get(url)
             .call()
-            .with_context(|| format!("Failed to fetch {url}"))?;
+            .with_context(|| format!("Failed to fetch {}", escape(url)))?;
 
         let body = response
             .into_string()
@@ -391,7 +391,7 @@ impl RegistryClient {
         let parts: Vec<&str> = repo_path.split('/').collect();
 
         if parts.len() != 2 {
-            anyhow::bail!("Invalid GitHub shorthand: {}", shorthand);
+            anyhow::bail!("Invalid GitHub shorthand: {}", escape(shorthand));
         }
 
         let (user, repo) = (parts[0], parts[1]);
@@ -405,7 +405,13 @@ impl RegistryClient {
         let response = ureq::get(&api_url)
             .set("User-Agent", "meta-cli")
             .call()
-            .with_context(|| format!("Failed to fetch latest release for {}/{}", user, repo))?;
+            .with_context(|| {
+                format!(
+                    "Failed to fetch latest release for {}/{}",
+                    escape(user),
+                    escape(repo)
+                )
+            })?;
 
         let body = response
             .into_string()
@@ -497,6 +503,29 @@ impl ArchiveFormat {
             None
         }
     }
+}
+
+/// No release of `shorthand` was found at any of `tried` URLs. Each value
+/// comes from the user or the network, so each stays on its line.
+fn release_not_found(
+    shorthand: &GitHubShorthand,
+    tried: usize,
+    last_error: Option<anyhow::Error>,
+) -> anyhow::Error {
+    anyhow::anyhow!(
+        "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
+        escape(&shorthand.user),
+        escape(&shorthand.repo),
+        shorthand
+            .version
+            .as_ref()
+            .map(|v| format!("@{}", escape(v)))
+            .unwrap_or_default(),
+        tried,
+        last_error
+            .map(|e| escape(&format!("{e:#}")).into_owned())
+            .unwrap_or_default()
+    )
 }
 
 /// Parsed GitHub shorthand: user/repo[@version]
@@ -625,46 +654,16 @@ impl PluginInstaller {
         &self.scope
     }
 
-    /// Find the workspace root directory by walking up from the current directory
-    ///
-    /// Searches for:
-    /// 1. `.meta/` directory (new format, preferred)
-    /// 2. `.meta.yaml`, `.meta.yml`, or `.meta` config file (legacy formats)
-    ///
-    /// Walks up the directory tree until one is found or filesystem root is reached.
-    ///
-    /// # Errors
-    /// Find the workspace root starting from the given directory.
-    /// Walks up the directory tree looking for .meta/ directory or legacy config files.
+    /// Find the nearest directory holding a config file (not a bare `.meta/`).
     fn find_workspace_root_from(start_dir: &Path) -> Result<PathBuf> {
-        use crate::config::find_meta_config_in;
+        meta_core::config::nearest_meta_dir(start_dir)?.ok_or_else(|| anyhow::anyhow!(
+            "Not in a meta workspace.\nExpected to find a config file: {}.\nCreate one here (e.g. .meta.yaml), or cd into a workspace.",
+            meta_core::config::META_CONFIG_NAMES.join(", ")
+        ))
+    }
 
-        // Walk up the directory tree once, checking both .meta/ and config files
-        let mut current = start_dir;
-        loop {
-            // Check for .meta/ directory (new format)
-            let meta_dir = current.join(".meta");
-            if meta_dir.is_dir() {
-                return Ok(current.to_path_buf());
-            }
-
-            // Check for legacy config files in current directory
-            if let Some((_config_path, _)) = find_meta_config_in(current)? {
-                return Ok(current.to_path_buf());
-            }
-
-            // Move to parent directory
-            match current.parent() {
-                Some(parent) => current = parent,
-                None => break,
-            }
-        }
-
-        anyhow::bail!(
-            "Not in a meta workspace.\n\
-             Expected to find .meta/ directory or .meta.yaml config file.\n\
-             Run 'meta init' to create a new workspace, or cd to an existing workspace."
-        )
+    pub fn plugins_dir(&self) -> &Path {
+        &self.plugins_dir
     }
 
     /// Get the default plugins directory (~/.meta/plugins/)
@@ -675,7 +674,28 @@ impl PluginInstaller {
     /// Ensure the plugins directory exists
     fn ensure_plugins_dir(&self) -> Result<()> {
         // Made 0700, whatever the umask
-        meta_core::data_dir::create_private_dir(&self.plugins_dir)
+        meta_core::data_dir::create_private_dir(&self.plugins_dir)?;
+        if self.scope == InstallScope::Local {
+            let ignore_path = self.plugins_dir.join(".gitignore");
+            match std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(&ignore_path)
+            {
+                Ok(mut file) => {
+                    use std::io::Write;
+                    file.write_all(b"*\n").with_context(|| {
+                        format!("Failed to write {}", escape_path(&ignore_path))
+                    })?;
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => {
+                    return Err(e)
+                        .with_context(|| format!("Failed to create {}", escape_path(&ignore_path)))
+                }
+            }
+        }
+        Ok(())
     }
 
     /// Get the manifest file path
@@ -721,7 +741,7 @@ impl PluginInstaller {
     fn download(&self, url: &str) -> Result<Vec<u8>> {
         let response = ureq::get(url)
             .call()
-            .with_context(|| format!("Failed to download {url}"))?;
+            .with_context(|| format!("Failed to download {}", escape(url)))?;
 
         let mut bytes = Vec::new();
         response
@@ -737,14 +757,16 @@ impl PluginInstaller {
         let platform = RegistryClient::current_platform();
 
         // Get the download URL for the current platform and latest version
-        let releases = metadata
-            .releases
-            .get(&metadata.version)
-            .with_context(|| format!("No releases found for version {}", metadata.version))?;
+        let releases = metadata.releases.get(&metadata.version).with_context(|| {
+            format!(
+                "No releases found for version {}",
+                escape(&metadata.version)
+            )
+        })?;
 
         let download_url = self
             .get_platform_url(releases, &platform)
-            .with_context(|| format!("No release available for platform {platform}"))?;
+            .with_context(|| format!("No release available for platform {}", escape(&platform)))?;
 
         info!(
             "Downloading {} v{} for {}",
@@ -855,18 +877,7 @@ impl PluginInstaller {
         }
 
         // If we get here, none of the URLs worked
-        anyhow::bail!(
-            "Could not find release for {}/{}{}\nTried {} URL(s). Last error: {}",
-            shorthand.user,
-            shorthand.repo,
-            shorthand
-                .version
-                .as_ref()
-                .map(|v| format!("@{v}"))
-                .unwrap_or_default(),
-            urls.len(),
-            last_error.unwrap()
-        )
+        Err(release_not_found(shorthand, urls.len(), last_error))
     }
 
     /// Construct possible GitHub release URLs for a shorthand
@@ -980,7 +991,7 @@ impl PluginInstaller {
             self.validate_plugin(&plugin_path).with_context(|| {
                 // Remove invalid plugin on failure
                 let _ = std::fs::remove_file(&plugin_path);
-                format!("Plugin validation failed for {plugin_name}")
+                format!("Plugin validation failed for {}", escape(plugin_name))
             })?;
         }
 
@@ -992,7 +1003,7 @@ impl PluginInstaller {
         // Try to detect format from URL first, then fall back to magic bytes
         let format = ArchiveFormat::from_url(url)
             .or_else(|| ArchiveFormat::from_bytes(bytes))
-            .with_context(|| format!("Unsupported archive format: {url}"))?;
+            .with_context(|| format!("Unsupported archive format: {}", escape(url)))?;
 
         match format {
             ArchiveFormat::TarGz => self.extract_tar_gz(bytes),
@@ -1042,7 +1053,8 @@ impl PluginInstaller {
                 // Require one filename component on both Unix and Windows.
                 anyhow::ensure!(
                     !file_name.contains(['/', '\\']),
-                    "ZIP plugin entry must be a top-level filename: {file_name}"
+                    "ZIP plugin entry must be a top-level filename: {}",
+                    escape(&file_name)
                 );
                 entries.push((i, file_name));
             }
@@ -1113,9 +1125,19 @@ impl PluginInstaller {
 
                         plugins.push(PluginInfo {
                             name: name.to_string(),
-                            version: manifest_entry.and_then(|e| e.version.clone()),
+                            version: match crate::subprocess_plugins::probe_plugin_info(&path) {
+                                Ok(info) => info.map(|info| info.version),
+                                Err(e) => {
+                                    eprintln!("Warning: {e}");
+                                    None
+                                }
+                            },
                             source: manifest_entry.map(|e| e.source.clone()),
-                            location: PluginLocation::Installed,
+                            location: if self.scope == InstallScope::Local {
+                                PluginLocation::ProjectLocal
+                            } else {
+                                PluginLocation::Installed
+                            },
                             installed: manifest_entry.map(|e| e.installed.clone()),
                         });
                     }
@@ -1144,7 +1166,7 @@ impl PluginInstaller {
             info!("Uninstalled {}", plugin_name);
             Ok(())
         } else {
-            anyhow::bail!("Plugin {plugin_name} is not installed")
+            anyhow::bail!("Plugin {} is not installed", escape(&plugin_name))
         }
     }
 
@@ -1156,9 +1178,9 @@ impl PluginInstaller {
         let manifest = self.load_manifest()?;
         let plugin_name = ensure_plugin_prefix(plugin_name);
 
-        let entry = manifest
-            .get_plugin(&plugin_name)
-            .ok_or_else(|| anyhow::anyhow!("Plugin {} not found in manifest", plugin_name))?;
+        let entry = manifest.get_plugin(&plugin_name).ok_or_else(|| {
+            anyhow::anyhow!("Plugin {} not found in manifest", escape(&plugin_name))
+        })?;
 
         // Check if source is a GitHub shorthand
         if !entry.source.contains('/') {
@@ -1199,7 +1221,7 @@ impl PluginInstaller {
 
         let entry = manifest
             .get_plugin(&plugin_name)
-            .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", plugin_name))?;
+            .ok_or_else(|| anyhow::anyhow!("Plugin {} not installed", escape(&plugin_name)))?;
 
         // Parse source as GitHub shorthand
         let shorthand = GitHubShorthand::parse(&entry.source).ok_or_else(|| {
@@ -1225,6 +1247,23 @@ impl PluginInstaller {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_missing_releases_error_keeps_each_value_on_its_line() {
+        let shorthand = GitHubShorthand {
+            user: "o\nFORGED".to_string(),
+            repo: "r\u{1b}[2J".to_string(),
+            version: Some("v1\nFORGED".to_string()),
+        };
+        let message =
+            release_not_found(&shorthand, 2, Some(anyhow::anyhow!("e\nFORGED"))).to_string();
+        assert_eq!(message.lines().count(), 2, "{message}");
+        assert!(!message.contains('\u{1b}'), "{message}");
+        assert!(
+            message.starts_with("Could not find release for o\\nFORGED/"),
+            "{message}"
+        );
+    }
 
     #[test]
     fn test_registry_config_default() {
@@ -2019,8 +2058,9 @@ mod tests {
         assert!(plugins.is_empty());
     }
 
+    #[cfg(unix)]
     #[test]
-    fn test_list_plugins_detailed_with_manifest() {
+    fn test_list_plugins_detailed_uses_binary_version_and_manifest_provenance() {
         let dir = tempfile::tempdir().unwrap();
         let installer = PluginInstaller {
             plugins_dir: dir.path().to_path_buf(),
@@ -2030,7 +2070,13 @@ mod tests {
 
         // Create plugin file
         std::fs::create_dir_all(dir.path()).unwrap();
-        std::fs::write(dir.path().join("meta-test"), b"fake plugin").unwrap();
+        let plugin_path = dir.path().join("meta-test");
+        std::fs::write(
+            &plugin_path,
+            b"#!/bin/sh\necho '{\"name\":\"test\",\"version\":\"2.0.0\",\"commands\":[]}'\n",
+        )
+        .unwrap();
+        make_executable(&plugin_path).unwrap();
 
         // Create manifest
         let mut manifest = PluginManifest::default();
@@ -2049,14 +2095,14 @@ mod tests {
         let plugins = installer.list_plugins_detailed().unwrap();
         assert_eq!(plugins.len(), 1);
         assert_eq!(plugins[0].name, "meta-test");
-        assert_eq!(plugins[0].version.as_deref(), Some("v1.0.0"));
+        assert_eq!(plugins[0].version.as_deref(), Some("2.0.0"));
         assert_eq!(plugins[0].source.as_deref(), Some("test-user/meta-test"));
     }
 
     // === M4: Project-local plugin installation tests ===
 
     #[test]
-    fn test_find_workspace_root_with_meta_directory() {
+    fn test_find_workspace_root_rejects_bare_meta_directory() {
         let temp = tempfile::tempdir().unwrap();
         let meta_dir = temp.path().join(".meta");
         std::fs::create_dir(&meta_dir).unwrap();
@@ -2065,19 +2111,15 @@ mod tests {
         let subdir = temp.path().join("sub").join("dir");
         std::fs::create_dir_all(&subdir).unwrap();
 
-        // Test from subdirectory - should walk up and find .meta/
         let result = PluginInstaller::find_workspace_root_from(&subdir);
-
-        assert!(result.is_ok());
-        // Canonicalize paths for comparison (handles /var vs /private/var on macOS)
-        assert_eq!(
-            result.unwrap().canonicalize().unwrap(),
-            temp.path().canonicalize().unwrap()
-        );
+        assert!(result
+            .unwrap_err()
+            .to_string()
+            .contains("Not in a meta workspace"));
     }
 
     #[test]
-    fn test_find_workspace_root_with_legacy_yaml() {
+    fn test_find_workspace_root_with_yaml() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
 
@@ -2092,7 +2134,7 @@ mod tests {
     }
 
     #[test]
-    fn test_find_workspace_root_with_legacy_json() {
+    fn test_find_workspace_root_with_legacy_meta_file() {
         let temp = tempfile::tempdir().unwrap();
         std::fs::write(temp.path().join(".meta"), r#"{"projects":{}}"#).unwrap();
 
@@ -2110,19 +2152,20 @@ mod tests {
     fn test_find_workspace_root_fails_outside_workspace() {
         let temp = tempfile::tempdir().unwrap();
 
-        let result = PluginInstaller::find_workspace_root_from(temp.path());
+        let result =
+            PluginInstaller::find_workspace_root_from(temp.path().ancestors().last().unwrap());
 
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Not in a meta workspace"));
-        assert!(err_msg.contains("meta init"));
+        assert!(err_msg.contains("Create one here"));
     }
 
     #[test]
-    fn test_find_workspace_root_prefers_meta_dir_over_legacy() {
+    fn test_find_workspace_root_with_config_and_meta_directory() {
         let temp = tempfile::tempdir().unwrap();
 
-        // Create both .meta/ directory and legacy .meta.yaml
+        // A config file establishes a workspace alongside its .meta/ directory.
         let meta_dir = temp.path().join(".meta");
         std::fs::create_dir(&meta_dir).unwrap();
         std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
@@ -2144,6 +2187,8 @@ mod tests {
         let meta_dir = temp.path().join(".meta");
         std::fs::create_dir(&meta_dir).unwrap();
 
+        std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
+
         // Create plugins dir so we can canonicalize it
         let plugins_dir = temp.path().join(LOCAL_PLUGINS_DIR);
         std::fs::create_dir_all(&plugins_dir).unwrap();
@@ -2164,13 +2209,27 @@ mod tests {
     fn test_new_local_fails_outside_workspace() {
         let temp = tempfile::tempdir().unwrap();
 
-        let result = PluginInstaller::new_local_from(temp.path(), false);
+        let result =
+            PluginInstaller::new_local_from(temp.path().ancestors().last().unwrap(), false);
 
         assert!(result.is_err());
         assert!(result
             .unwrap_err()
             .to_string()
             .contains("Not in a meta workspace"));
+    }
+
+    #[test]
+    fn local_plugins_gitignore_is_created_and_existing_file_is_kept() {
+        let temp = tempfile::tempdir().unwrap();
+        std::fs::write(temp.path().join(".meta.yaml"), "projects: {}").unwrap();
+        let installer = PluginInstaller::new_local_from(temp.path(), false).unwrap();
+        installer.ensure_plugins_dir().unwrap();
+        let path = installer.plugins_dir.join(".gitignore");
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "*\n");
+        std::fs::write(&path, "custom\n").unwrap();
+        installer.ensure_plugins_dir().unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), "custom\n");
     }
 
     #[test]

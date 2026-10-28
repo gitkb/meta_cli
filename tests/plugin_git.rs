@@ -352,6 +352,8 @@ fn malformed_worktree_membership_is_reported_before_dispatch() {
         .args(["exec", "--", "/usr/bin/touch", marker.to_str().unwrap()])
         .current_dir(&worktree)
         .env("HOME", &root)
+        .env("XDG_CONFIG_HOME", root.join("xdg"))
+        .env("GIT_CONFIG_GLOBAL", root.join("gitconfig"))
         .env("META_DATA_DIR", root.join("data"))
         .env("PATH", "/usr/bin:/bin")
         .output()

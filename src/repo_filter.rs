@@ -55,29 +55,34 @@ pub fn select(
             id: std::fs::canonicalize(dir).unwrap_or_else(|_| PathBuf::from(dir)),
         })
         .collect();
+    // A path is the repo's, or leads there through a link
+    let names_dir = |path: &str, repo: &Repo| {
+        *path == repo.path || std::fs::canonicalize(root.join(path)).is_ok_and(|id| id == repo.id)
+    };
     let named = |flag: &str, value: &str| -> Result<Vec<&Path>> {
         let wanted = path_value(value);
         let by_path = distinct(
             repos
                 .iter()
-                .filter(|r| wanted.as_deref() == Some(r.path.as_str())),
+                .filter(|r| wanted.as_deref().is_some_and(|path| names_dir(path, r))),
         );
         let by_name = if value.starts_with("./") {
             vec![]
         } else {
-            distinct(
-                repos
+            distinct(repos.iter().filter(|r| {
+                names
                     .iter()
-                    .filter(|r| names.iter().any(|(name, p)| name == value && *p == r.path)),
-            )
+                    .any(|(name, p)| name == value && names_dir(p, r))
+            }))
         };
         let listed = |repos: &[&Repo]| -> String {
             repos
                 .iter()
-                .map(|r| r.path.as_str())
+                .map(|r| meta_core::display::escape(&r.path))
                 .collect::<Vec<_>>()
                 .join(", ")
         };
+        let value = meta_core::display::escape(value);
         if by_name.len() > 1 {
             bail!(
                 "{flag} '{value}' is the .meta name of the repos at {}; name one by its path, \
@@ -100,7 +105,7 @@ pub fn select(
             bail!(
                 "{flag} '{value}' names none of the repos this command runs in. Use a repo's \
                  name from .meta or its path from the workspace root (`.` for the root), as \
-                 `meta project list` shows it; in a worktree set, its alias. --tag and \
+                 `meta project list` shows it; in a worktree set, the same, from the set's root. --tag and \
                  --recursive change which repos the command runs in."
             );
         }

@@ -6,7 +6,7 @@
 //! for worktree management commands.
 
 use anyhow::{Context, Result};
-use meta_core::display::{escape_lines, escape_path};
+use meta_core::display::{escape, escape_lines, escape_path};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -67,6 +67,182 @@ pub fn detect_worktree_location(cwd: &Path) -> Option<(String, PathBuf)> {
     None
 }
 
+/// The config that names the members of the set at `set_dir`: the set's own
+/// (its root checkout's), else the config of the workspace meta recorded the
+/// set was made from. Only a set without meta's records looks above itself.
+pub fn set_config(
+    set_dir: &Path,
+    members: &[PathBuf],
+    config_name: Option<&PathBuf>,
+) -> Result<Option<(PathBuf, meta_core::config::ConfigFormat)>> {
+    use meta_core::config;
+    if let Some(found) = config::meta_config_at(set_dir, config_name)? {
+        return Ok(Some(found));
+    }
+    match set_origin(set_dir, members)? {
+        Some(source) => config::meta_config_at(&source, config_name),
+        None => config::find_meta_config(set_dir, config_name),
+    }
+}
+
+/// The workspace meta recorded the set at `set_dir` was made from, by the
+/// members whose record names this set (another set's checkout moved in
+/// doesn't count). Members that name different workspaces are an error.
+fn set_origin(set_dir: &Path, members: &[PathBuf]) -> Result<Option<PathBuf>> {
+    use meta_core::config;
+    let set = set_dir
+        .canonicalize()
+        .unwrap_or_else(|_| set_dir.to_path_buf());
+    let mut origin: Option<PathBuf> = None;
+    for member in members {
+        if config::recorded_set(member).as_ref() != Some(&set) {
+            continue;
+        }
+        let Some(project) = config::recorded_project(member) else {
+            continue;
+        };
+        match &origin {
+            Some(first) if *first != project => anyhow::bail!(
+                "The checkouts of worktree set {} name different workspaces ({} and {}); \
+                 meta can't tell which config describes them. Pass --primary to run in the workspace.",
+                escape_path(set_dir),
+                escape_path(first),
+                escape_path(&project)
+            ),
+            _ => origin = Some(project),
+        }
+    }
+    Ok(origin)
+}
+
+/// The meta tree that describes the checkouts of the set at `set_dir`, whose
+/// config lists `projects`: the nested configs of the workspace the set was
+/// made from, for nested meta repos the set doesn't hold (one skipped, say),
+/// then the set's own, so a map built from it in order lets the set's win.
+/// The workspace's part is best effort: what neither tells about stays
+/// unselected.
+pub fn set_tree(
+    set_dir: &Path,
+    members: &[PathBuf],
+    projects: &[meta_core::config::ProjectInfo],
+) -> Result<Vec<meta_core::config::MetaTreeNode>> {
+    use meta_core::config;
+    let own = config::walk_projects(set_dir, projects, None)?;
+    let mut tree: Vec<_> = set_origin(set_dir, members)?
+        .map(|dir| {
+            let mut visited = std::collections::HashSet::new();
+            not_held(readable_tree(&dir, projects, &mut visited), set_dir)
+        })
+        .unwrap_or_default();
+    tree.extend(own);
+    Ok(tree)
+}
+
+/// The meta tree of `projects` in `dir`, passing over each nested config
+/// that can't be read: one broken config loses only its own projects.
+fn readable_tree(
+    dir: &Path,
+    projects: &[meta_core::config::ProjectInfo],
+    visited: &mut std::collections::HashSet<PathBuf>,
+) -> Vec<meta_core::config::MetaTreeNode> {
+    use meta_core::config;
+    projects
+        .iter()
+        .map(|project| {
+            let path = dir.join(&project.path);
+            let nested = config::find_meta_config_in(&path).ok().flatten();
+            // each meta repo once, as `walk_projects` does: links can loop
+            let children = nested
+                .as_ref()
+                .filter(|_| visited.insert(path.canonicalize().unwrap_or_else(|_| path.clone())))
+                .and_then(|(config, _)| config::parse_meta_config(config).ok())
+                .map(|(projects, _)| readable_tree(&path, &projects, visited))
+                .unwrap_or_default();
+            config::MetaTreeNode {
+                info: project.clone(),
+                is_meta: nested.is_some(),
+                children,
+            }
+        })
+        .collect()
+}
+
+/// `nodes` without the projects of the nested meta repos whose config the
+/// set at `dir` holds: those the set's own tree describes.
+fn not_held(
+    nodes: Vec<meta_core::config::MetaTreeNode>,
+    dir: &Path,
+) -> Vec<meta_core::config::MetaTreeNode> {
+    nodes
+        .into_iter()
+        .map(|mut node| {
+            let place = dir.join(&node.info.path);
+            node.children = match meta_core::config::find_meta_config_in(&place) {
+                Ok(Some(_)) => Vec::new(),
+                _ => not_held(node.children, &place),
+            };
+            node
+        })
+        .collect()
+}
+
+/// Whether a checkout meta made for a set (a linked worktree with meta's
+/// record, readable or not, or one whose git directory can't be found) may
+/// be under `dir`, as in a set moved by hand; a part of `dir` that can't be
+/// read may hold one too. Other tools' worktrees
+/// have no record; plain clones (a `.git` directory, or a link to one) are
+/// not looked inside.
+pub fn holds_meta_checkout(dir: &Path) -> bool {
+    let canonical_dir = dir.canonicalize().unwrap_or_else(|_| dir.to_path_buf());
+    // Where discovery looks: not in `.git`, nor in the sets of a workspace
+    // that is itself under `.worktrees` (its own nested `.worktrees`)
+    let mut walk = walkdir::WalkDir::new(dir)
+        .follow_links(false)
+        .into_iter()
+        .filter_entry(|entry| entry.depth() == 0 || ScannedDirs::searched(entry.path()));
+    while let Some(entry) = walk.next() {
+        // What can't be read may hold one: can't tell is no plain clone
+        let Ok(entry) = entry else { return true };
+        if !entry.file_type().is_dir() {
+            continue;
+        }
+        match std::fs::metadata(entry.path().join(".git")) {
+            Err(e) if e.kind() != std::io::ErrorKind::NotFound => return true,
+            Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
+            // a checkout of a set kept inside `dir` by a workspace inside
+            // `dir` (one there with sets of its own, wherever its
+            // worktrees_dir puts them) is no sign that `dir` is a set
+            Ok(_)
+                if meta_core::config::recorded_set(entry.path())
+                    .is_some_and(|set| set.starts_with(&canonical_dir) && set != canonical_dir)
+                    && meta_core::config::recorded_project(entry.path())
+                        .and_then(|project| project.canonicalize().ok())
+                        .is_some_and(|project| project.starts_with(&canonical_dir)) => {}
+            // even one meta can no longer read: it was meta's. A checkout
+            // whose git directory can't be found (moved, with relative paths)
+            // may be meta's too: it is not taken for a plain clone
+            Ok(_) => {
+                let meta_made =
+                    meta_core::config::gitfile_target(entry.path()).is_none_or(|admin| {
+                        // only a record that is surely absent says "not meta's"
+                        !admin.is_dir()
+                            || !matches!(
+                                admin
+                                    .join(meta_core::config::WORKTREE_RECORD_FILE)
+                                    .symlink_metadata(),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                            )
+                    });
+                if meta_made {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 /// Discover repos within a worktree task directory by scanning for .git files.
 /// Results are sorted by alias for deterministic output.
 pub fn discover_worktree_repos(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
@@ -110,7 +286,8 @@ pub fn discover_worktree_members(task_dir: &Path) -> Result<Vec<WorktreeMemberIn
     // Repos may be nested (e.g., "vendor/tree-sitter-markdown") when
     // dependencies have paths with intermediate directories.
     if task_dir.is_dir() {
-        discover_repos_recursive(task_dir, task_dir, &mut repos)?;
+        let scanned = ScannedDirs::of(task_dir);
+        discover_repos_recursive(task_dir, task_dir, &scanned, &mut repos)?;
     }
 
     // Sort by alias for deterministic output ("." sorts first)
@@ -128,6 +305,7 @@ pub fn discover_worktree_members(task_dir: &Path) -> Result<Vec<WorktreeMemberIn
 fn discover_repos_recursive(
     root: &Path,
     dir: &Path,
+    scanned: &ScannedDirs,
     repos: &mut Vec<WorktreeMemberInfo>,
 ) -> Result<()> {
     let entries = match std::fs::read_dir(dir) {
@@ -151,9 +329,7 @@ fn discover_repos_recursive(
             continue;
         }
 
-        // Skip hidden directories
-        let name = entry.file_name();
-        if name.to_string_lossy().starts_with('.') {
+        if !ScannedDirs::searched(&sub_path) {
             continue;
         }
 
@@ -163,6 +339,9 @@ fn discover_repos_recursive(
             .map(|m| m.is_file())
             .unwrap_or(false)
         {
+            if !scanned.member(root, &sub_path) {
+                continue;
+            }
             // This is a worktree repo — use relative path from root as alias
             let source = match source_repo_from_gitfile(&sub_git) {
                 Ok(s) => s,
@@ -187,7 +366,7 @@ fn discover_repos_recursive(
             });
         } else {
             // Not a repo — recurse into intermediate directory
-            if let Err(e) = discover_repos_recursive(root, &sub_path, repos) {
+            if let Err(e) = discover_repos_recursive(root, &sub_path, scanned, repos) {
                 log::debug!(
                     "Skipping subtree {}: {}",
                     escape_path(&sub_path),
@@ -200,8 +379,10 @@ fn discover_repos_recursive(
 }
 
 /// Discover all realized worktrees, including repos nested beneath other repos.
-/// Unlike legacy discovery, traversal errors are fatal. Hidden directories and
-/// directory symlinks are excluded; traversal never follows links outside the set.
+/// Unlike legacy discovery, traversal errors are fatal. Under a hidden
+/// directory only checkouts meta recorded in this set count (see
+/// `ScannedDirs`); directory symlinks are not followed, so traversal never
+/// leaves the set.
 /// A finite entry budget prevents unbounded scans of generated directory trees.
 pub fn discover_worktree_repos_recursive(task_dir: &Path) -> Result<Vec<WorktreeRepoInfo>> {
     Ok(discover_worktree_members_recursive(task_dir)?
@@ -220,21 +401,61 @@ pub struct WorktreeMemberInfo {
     pub source_path: PathBuf,
 }
 
+/// Which checkouts in a set are its members. `.git` and a nested
+/// `.worktrees` hold none. Under another hidden directory, only a checkout
+/// meta's record says it made for this set counts: a project may live at
+/// `.deps/x`, but a tool's own worktrees (`.claude/worktrees/x`) are not the
+/// set's.
+struct ScannedDirs {
+    set: PathBuf,
+}
+
+impl ScannedDirs {
+    fn of(task_dir: &Path) -> Self {
+        ScannedDirs {
+            set: task_dir
+                .canonicalize()
+                .unwrap_or_else(|_| task_dir.to_path_buf()),
+        }
+    }
+
+    /// Whether to look for members inside `dir`.
+    fn searched(dir: &Path) -> bool {
+        dir.file_name()
+            .is_none_or(|name| name != ".git" && name != ".worktrees")
+    }
+
+    /// Whether the checkout at `dir`, inside the set at `root`, is a member.
+    fn member(&self, root: &Path, dir: &Path) -> bool {
+        let hidden = dir.strip_prefix(root).is_ok_and(|place| {
+            place
+                .components()
+                .any(|c| c.as_os_str().to_string_lossy().starts_with('.'))
+        });
+        !hidden || meta_core::config::recorded_set(dir).as_ref() == Some(&self.set)
+    }
+}
+
 pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<WorktreeMemberInfo>> {
     let mut repos = Vec::new();
+    let scanned = ScannedDirs::of(task_dir);
     let entries = walkdir::WalkDir::new(task_dir)
         .follow_links(false)
         .into_iter()
-        .filter_entry(|entry| {
-            entry.depth() == 0 || !entry.file_name().to_string_lossy().starts_with('.')
-        });
+        .filter_entry(|entry| entry.depth() == 0 || ScannedDirs::searched(entry.path()));
     for (count, entry) in entries.enumerate() {
         anyhow::ensure!(
             count < 2_000_000,
             "Recursive worktree discovery exceeded 2000000 entries"
         );
-        let entry =
-            entry.with_context(|| format!("Cannot scan worktree {}", escape_path(task_dir)))?;
+        // walkdir's error names the path it failed on: kept on one line
+        let entry = entry.map_err(|e| {
+            anyhow::anyhow!(
+                "Cannot scan worktree {}: {}",
+                escape_path(task_dir),
+                escape(&e.to_string())
+            )
+        })?;
         if !entry.file_type().is_dir() {
             continue;
         }
@@ -248,7 +469,7 @@ pub fn discover_worktree_members_recursive(task_dir: &Path) -> Result<Vec<Worktr
                     .with_context(|| format!("Cannot inspect {}", escape_path(&git_file)))
             }
         };
-        if !metadata.is_file() {
+        if !metadata.is_file() || !scanned.member(task_dir, path) {
             continue;
         }
         validate_worktree_gitfile(&git_file)?;
@@ -331,7 +552,9 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     let dot_git_dir = gitdir_path
         .parent() // strip worktree name
         .and_then(|p| p.parent()) // strip "worktrees"
-        .ok_or_else(|| anyhow::anyhow!("Cannot derive source repo from gitdir: {gitdir}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot derive source repo from gitdir: {}", escape(gitdir))
+        })?;
 
     // dot_git_dir is now the .git directory; parent is the repo root
     let repo_root = dot_git_dir.parent().ok_or_else(|| {
@@ -347,6 +570,32 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod recursive_tests {
     use super::*;
+
+    #[test]
+    fn the_sets_own_nested_config_wins_over_the_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, set) = (tmp.path().join("ws"), tmp.path().join("set"));
+        let config = |dir: &Path, projects: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(".meta.json"),
+                format!(r#"{{"projects": {{{projects}}}}}"#),
+            )
+            .unwrap();
+        };
+        config(&workspace, r#""parent": {"repo": "x", "meta": true}"#);
+        config(&workspace.join("parent"), r#""x": "x""#);
+        let (projects, _) =
+            meta_core::config::parse_meta_config(&workspace.join(".meta.json")).unwrap();
+        let tree = meta_core::config::walk_projects(&workspace, &projects, None).unwrap();
+
+        // the set doesn't hold parent: the workspace's config tells about x
+        std::fs::create_dir_all(&set).unwrap();
+        assert_eq!(not_held(tree.clone(), &set)[0].children.len(), 1);
+        // the set holds parent's config, which no longer lists x
+        config(&set.join("parent"), "");
+        assert!(not_held(tree, &set)[0].children.is_empty());
+    }
 
     /// Create a real committed repository and linked worktree in the fixture.
     fn member(root: &Path, alias: &str) {
@@ -474,15 +723,27 @@ mod recursive_tests {
 
     #[cfg(unix)]
     #[test]
-    /// Hidden directories and symlink cycles are excluded from traversal.
-    fn recursive_skips_hidden_directories_and_symlink_cycles() {
+    /// Under a hidden directory, a checkout meta recorded for this set is a
+    /// member; others (an agent's own worktrees), a nested set and symlink
+    /// cycles are not.
+    fn recursive_finds_recorded_hidden_members_only() {
         let temp = tempfile::tempdir().unwrap();
-        member(temp.path(), "visible");
-        member(temp.path(), ".hidden/child");
-        std::os::unix::fs::symlink(temp.path(), temp.path().join("visible/cycle")).unwrap();
+        let root = temp.path().canonicalize().unwrap();
+        member(&root, "visible");
+        member(&root, ".deps/child");
+        let gitfile = std::fs::read_to_string(root.join(".deps/child/.git")).unwrap();
+        let admin = Path::new(gitfile.trim().strip_prefix("gitdir: ").unwrap());
+        std::fs::write(
+            admin.join(meta_core::config::WORKTREE_RECORD_FILE),
+            serde_json::json!({ "project": "/p", "set": root }).to_string(),
+        )
+        .unwrap();
+        member(&root, ".claude/worktrees/agent");
+        member(&root, ".worktrees/other");
+        std::os::unix::fs::symlink(&root, root.join("visible/cycle")).unwrap();
         assert_eq!(
-            aliases(discover_worktree_repos_recursive(temp.path()).unwrap()),
-            ["visible"]
+            aliases(discover_worktree_repos_recursive(&root).unwrap()),
+            [".deps/child", "visible"]
         );
     }
     /// Relative Git links resolve against the checkout, independently of cwd.

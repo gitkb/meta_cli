@@ -177,7 +177,7 @@ struct InitArgs {
 enum InitCommands {
     /// Install Claude Code skills, rules, and hooks for this meta repo
     Claude {
-        /// Overwrite all existing files including settings
+        /// Refresh skills and rules, merge meta hooks into settings
         #[arg(short, long)]
         force: bool,
 
@@ -287,10 +287,15 @@ fn write_help_with_plugin_commands(
         commands.push((name, desc, Some(plugin)));
     }
 
-    // Plugin commands (e.g., "git", "project", "rust")
+    // Plugin namespaces must be claimed commands, not merely plugin names.
     // These are invoked as `meta <plugin> <subcommand>`
     // Mark them with plugin name and version suffix
     for (name, version, description) in plugins.list_plugins() {
+        if !plugins.available_commands().iter().any(|(command, owner)| {
+            *owner == name && command.split_whitespace().next() == Some(name)
+        }) {
+            continue;
+        }
         commands.push((
             name.to_string(),
             description.to_string(),
@@ -308,8 +313,13 @@ fn write_help_with_plugin_commands(
         None,
     ));
 
-    // Render commands section
+    // Render commands section; plugins name and describe their own commands,
+    // so each value stays on its line
     writeln!(w, "Commands:")?;
+    let commands: Vec<_> = commands
+        .iter()
+        .map(|(name, desc, plugin)| (escape(name), escape(desc), plugin.as_deref().map(escape)))
+        .collect();
     let max_name_len = commands.iter().map(|c| c.0.len()).max().unwrap_or(10);
     for (name, desc, plugin_opt) in &commands {
         let suffix = plugin_opt
@@ -456,9 +466,48 @@ fn print_plugin_update_help() {
 
 // === Main Entry Point ===
 
+/// Exit status for output cut off by a closed stdout, as a shell reports a
+/// command SIGPIPE stopped (128 + 13): a failure it hid isn't success.
+const CLOSED_STDOUT: u8 = 141;
+
+/// `println!` panics when stdout is a closed pipe (`meta … | head`). End
+/// quietly instead, as a fallible write to stdout does; other panics are
+/// reported as usual.
+fn exit_quietly_on_closed_stdout() {
+    let report = std::panic::take_hook();
+    std::panic::set_hook(Box::new(move |info| {
+        let payload = info.payload();
+        let message = payload
+            .downcast_ref::<String>()
+            .map(String::as_str)
+            .or_else(|| payload.downcast_ref::<&str>().copied())
+            .unwrap_or("");
+        if is_closed_stdout_panic(message) {
+            std::process::exit(CLOSED_STDOUT.into());
+        }
+        report(info)
+    }));
+}
+
+/// Whether `message` is std's panic for printing to a closed stdout: a
+/// broken pipe, which Windows reports as os error 109 or 232.
+fn is_closed_stdout_panic(message: &str) -> bool {
+    message.starts_with("failed printing to stdout")
+        && ["Broken pipe", "(os error 109)", "(os error 232)"]
+            .iter()
+            .any(|closed| message.contains(closed))
+}
+
 fn main() -> std::process::ExitCode {
+    exit_quietly_on_closed_stdout();
     match run_cli() {
         Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(e)
+            if e.downcast_ref::<loop_lib::StdoutError>()
+                .is_some_and(|e| e.0.kind() == std::io::ErrorKind::BrokenPipe) =>
+        {
+            std::process::ExitCode::from(CLOSED_STDOUT)
+        }
         Err(e) => {
             // as Rust prints an error returned from main, but escaped: it can
             // carry paths and names from git and the filesystem
@@ -486,7 +535,7 @@ fn run_cli() -> Result<()> {
         })
         .init();
 
-    let mut cli = Cli::parse();
+    let mut cli: Cli = meta_cli::args::parse();
 
     log::debug!("cli.json = {}", cli.json);
 
@@ -596,7 +645,7 @@ fn run_cli() -> Result<()> {
 
                 if is_root_help || (is_bare && !is_promoted) {
                     if let Some(help_text) = subprocess_plugins.get_plugin_help(first) {
-                        println!("{help_text}");
+                        subprocess_plugins::print_output(&format!("{help_text}\n"))?;
                         return Ok(());
                     }
                 }
@@ -720,6 +769,16 @@ fn handle_command_dispatch(
                 .into_iter()
                 .map(|member| member.path)
                 .collect();
+            // Inside a set, a command never falls back to the workspace's
+            // own checkouts: they aren't the ones the caller is in. A plain
+            // clone that is merely under a `.worktrees` directory is no set.
+            if paths.is_empty() && worktree::holds_meta_checkout(&root) {
+                anyhow::bail!(
+                    "No checkouts of worktree set '{}' found in {}. Run from a set meta made, or pass --primary to run in the workspace.",
+                    escape(&name),
+                    escape_path(&root)
+                );
+            }
             (!paths.is_empty()).then_some((name, root, paths))
         } else {
             None
@@ -733,27 +792,42 @@ fn handle_command_dispatch(
                 );
             }
 
-            // Try to find .meta config for full feature support
-            if let Some((config_path, _format)) = find_meta_config(&task_dir, cli.config.as_ref()) {
+            if let Some((config_path, _format)) =
+                worktree::set_config(&task_dir, &wt_paths, cli.config.as_ref())?
+            {
                 let (meta_projects, ignore_list) = parse_meta_config(&config_path)?;
 
-                // Build name→info lookup for tag filtering
-                let project_map: std::collections::HashMap<&str, &ProjectInfo> =
-                    meta_projects.iter().map(|p| (p.name.as_str(), p)).collect();
+                // A set lays its repos out as the workspace: a checkout's path
+                // in the set is its project's path, nested meta repos included.
+                // Only a filter reads the nested configs; the set's own copies
+                // win over the workspace's (see set_tree).
+                let filtered = cli.tag.is_some() || cli.include.is_some() || cli.exclude.is_some();
+                let tree = if filtered {
+                    worktree::set_tree(&task_dir, &wt_paths, &meta_projects)?
+                } else {
+                    Vec::new()
+                };
+                // Compared as directories: a project at a link in the set is
+                // the checkout where the link leads
+                let real = |path: &std::path::Path| {
+                    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+                };
+                let project_map: std::collections::HashMap<PathBuf, ProjectInfo> =
+                    config::build_project_map(&tree, &task_dir, "")
+                        .into_iter()
+                        .map(|(place, (_, info))| (real(&task_dir.join(place)), info))
+                        .collect();
 
-                // Derive aliases from worktree paths and filter by tags
+                // Filter the checkouts by their projects' tags
                 let wt_directories: Vec<String> = wt_paths
                     .iter()
                     .filter(|path| {
                         if let Some(ref tag_filter) = cli.tag {
-                            let alias = path
-                                .file_name()
-                                .map(|n| n.to_string_lossy().to_string())
-                                .unwrap_or_else(|| ".".to_string());
-                            if let Some(info) = project_map.get(alias.as_str()) {
+                            if let Some(info) = project_map.get(&real(path)) {
                                 matches_tag_filter(&info.tags, tag_filter)
                             } else {
-                                true // Unknown projects pass through
+                                // As in the workspace, only the root runs without a project
+                                real(path) == real(&task_dir)
                             }
                         } else {
                             true
@@ -762,15 +836,16 @@ fn handle_command_dispatch(
                     .map(|p| p.display().to_string())
                     .collect();
 
-                // A worktree member sits at its alias, so its path in the set
-                // is the name to select it by
-                let wt_directories = select_repos(cli, wt_directories, &task_dir, Vec::new)?;
+                // Selected by project name or by its path in the set
+                let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
+                    repo_filter::repo_names(&task_dir, &meta_projects, &tree)
+                })?;
 
                 if wt_directories.is_empty() {
                     eprintln!(
                         "{}: no projects match tag filter '{}' in worktree '{}'",
                         "warning".yellow().bold(),
-                        cli.tag.as_deref().unwrap_or(""),
+                        escape(cli.tag.as_deref().unwrap_or("")),
                         escape(&task_name)
                     );
                     return Ok(());
@@ -835,6 +910,13 @@ fn handle_command_dispatch(
             }
 
             // No config found — degraded legacy path with warning
+            if let Some(tag) = &cli.tag {
+                anyhow::bail!(
+                    "No meta config found for worktree '{}', so --tag '{}' cannot select its repos",
+                    escape(&task_name),
+                    escape(tag)
+                );
+            }
             if cli.verbose {
                 eprintln!(
                     "{} No .meta config found for worktree '{}'. Tags, plugins, and dependency features unavailable.",
@@ -868,14 +950,14 @@ fn handle_command_dispatch(
         }
     }
 
-    let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref()) {
+    let absolute_path = match find_meta_config(&current_dir, cli.config.as_ref())? {
         Some((path, _format)) => path,
         None => {
             let config_name = cli
                 .config
                 .as_ref()
-                .map(|p| p.to_string_lossy().to_string())
-                .unwrap_or_else(|| ".meta / .meta.yaml / .meta.yml".to_string());
+                .map(|p| escape_path(p))
+                .unwrap_or_else(|| config::META_CONFIG_NAMES.join(" / "));
             eprintln!("Error: Could not find meta config file '{config_name}'");
             eprintln!("Searched from {} up to root", escape_path(&current_dir));
             std::process::exit(1);
@@ -887,7 +969,7 @@ fn handle_command_dispatch(
     if cli.verbose {
         println!("{}", "Verbose mode enabled".green());
         println!("Resolved config file path: {}", escape_path(&absolute_path));
-        println!("Executing command: {command_str}");
+        println!("Executing command: {}", escape(&command_str));
     }
 
     let (meta_projects, ignore_list) = parse_meta_config(&absolute_path)?;
@@ -1137,17 +1219,8 @@ fn handle_plugin_command(
                 return Ok(());
             }
             if local {
-                // For --local, use the registry-based listing for plugin management
-                let plugins = match PluginInstaller::new_local(verbose) {
-                    Ok(installer) => installer.list_plugins_detailed()?,
-                    Err(_) => {
-                        if !json {
-                            println!("Not in a meta workspace");
-                        }
-                        return Ok(());
-                    }
-                };
-
+                let installer = PluginInstaller::new_local(verbose)?;
+                let plugins = installer.list_plugins_detailed()?;
                 if json {
                     println!("{}", serde_json::to_string_pretty(&plugins)?);
                 } else if plugins.is_empty() {
@@ -1163,9 +1236,7 @@ fn handle_plugin_command(
                             .strip_prefix(PLUGIN_PREFIX)
                             .unwrap_or(&plugin.name);
                         let version = plugin.version.as_deref().unwrap_or("-");
-                        // For local plugins, show the path in the local plugins dir
-                        let cwd = std::env::current_dir()?;
-                        let path = cwd.join(".meta/plugins").join(&plugin.name);
+                        let path = installer.plugins_dir().join(&plugin.name);
                         println!(
                             "{:<12} {:<12} {}",
                             escape(name),
@@ -1222,7 +1293,7 @@ fn handle_plugin_command(
             installer.uninstall(&name)?;
 
             if !json {
-                println!("Successfully uninstalled {name} from {location}");
+                println!("Successfully uninstalled {} from {location}", escape(&name));
             }
         }
         PluginCommands::Update { name, local, check } => {
@@ -1416,8 +1487,9 @@ fn unrecognized_command_error(
     eprintln!(
         "{}: unrecognized command '{}'",
         "error".red().bold(),
-        first_cmd
+        escape(first_cmd)
     );
+    let command_str = escape(command_str);
     eprintln!();
     eprintln!("To run '{command_str}' across all repos:");
     eprintln!("    meta exec -- {command_str}");
@@ -1441,7 +1513,7 @@ fn check_and_warn_orphan() {
     }
 
     // Find the nearest .meta config
-    let Some((config_path, _)) = find_meta_config(&current_dir, None) else {
+    let Ok(Some((config_path, _))) = find_meta_config(&current_dir, None) else {
         return;
     };
 
@@ -1451,6 +1523,10 @@ fn check_and_warn_orphan() {
     };
 
     // Check if this meta repo is orphaned (not tracked by parent)
+    // A set's checkout is meta's own, not a repo its parent forgot to list
+    if config::set_source(&meta_dir).is_some() {
+        return;
+    }
     if let Some(warning) = config::check_orphan_status(&meta_dir) {
         eprintln!(
             "{}: This meta repo is not tracked by its parent.",
@@ -1461,14 +1537,9 @@ fn check_and_warn_orphan() {
         eprintln!();
 
         // Show format-appropriate syntax
-        let config_file = match warning.parent_format {
-            ConfigFormat::Json => ".meta",
-            ConfigFormat::Yaml => ".meta.yaml",
-        };
         eprintln!(
-            "  To include it, add to {}/{}:",
-            escape_path(&warning.parent),
-            config_file
+            "  To include it, add to {}:",
+            escape_path(&warning.parent_config)
         );
         match warning.parent_format {
             ConfigFormat::Json => {
@@ -1524,6 +1595,21 @@ fn flatten_filtered_inner(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn closed_stdout_panics_are_recognised_on_every_platform() {
+        for message in [
+            "failed printing to stdout: Broken pipe (os error 32)",
+            "failed printing to stdout: The pipe has been ended. (os error 109)",
+            "failed printing to stdout: The pipe is being closed. (os error 232)",
+        ] {
+            assert!(is_closed_stdout_panic(message), "{message}");
+        }
+        assert!(!is_closed_stdout_panic(
+            "failed printing to stdout: No space left on device (os error 28)"
+        ));
+        assert!(!is_closed_stdout_panic("index out of bounds: Broken pipe"));
+    }
     use std::io::Write;
     use tempfile::NamedTempFile;
 
@@ -1658,23 +1744,21 @@ ignore:
         let meta_path = dir.path().join(".meta");
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
         let (path, _format) = result.unwrap();
         assert_eq!(path, meta_path);
     }
 
     #[test]
-    fn test_find_meta_config_yaml_priority() {
+    fn test_find_meta_config_rejects_ambiguity() {
         let dir = tempfile::tempdir().unwrap();
-        // Create .meta first (JSON), then .meta.yaml
         std::fs::write(dir.path().join(".meta"), r#"{"projects": {}}"#).unwrap();
-
-        // .meta should be found first (it's checked before .meta.yaml)
-        let result = find_meta_config(dir.path(), None);
-        assert!(result.is_some());
-        let (path, _format) = result.unwrap();
-        assert!(path.ends_with(".meta"));
+        std::fs::write(dir.path().join(".meta.yaml"), "projects: {}").unwrap();
+        let err = find_meta_config(dir.path(), None).unwrap_err().to_string();
+        assert!(err.contains("Multiple meta config files"));
+        assert!(err.contains(".meta.yaml"));
+        assert!(err.contains(&escape_path(&dir.path().join(".meta"))));
     }
 
     #[test]
@@ -1917,7 +2001,7 @@ projects:
         std::fs::write(&meta_path, r#"{"projects": {}}"#).unwrap();
 
         // Search from nested directory should find root .meta
-        let result = find_meta_config(&nested, None);
+        let result = find_meta_config(&nested, None).unwrap();
         assert!(result.is_some());
         let (found_path, _) = result.unwrap();
         assert_eq!(found_path, meta_path);
@@ -1931,7 +2015,7 @@ projects:
         let yaml_path = dir.path().join(".meta.yaml");
         std::fs::write(&yaml_path, "projects:\n  p1: git@test.git\n").unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
 
         // Clean up and test .yml extension
@@ -1939,7 +2023,7 @@ projects:
         let yml_path = dir.path().join(".meta.yml");
         std::fs::write(&yml_path, "projects:\n  p2: git@test.git\n").unwrap();
 
-        let result = find_meta_config(dir.path(), None);
+        let result = find_meta_config(dir.path(), None).unwrap();
         assert!(result.is_some());
     }
 }

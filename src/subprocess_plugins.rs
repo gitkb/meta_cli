@@ -6,14 +6,98 @@
 use anyhow::{Context, Result};
 use meta_core::display::{escape, escape_path};
 use std::collections::HashMap;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::time::{Duration, Instant};
 
 #[allow(unused_imports)]
 pub use meta_plugin_protocol::{
     ExecutionPlan, PlanResponse as PluginResponse, PlannedCommand, PluginHelp, PluginInfo,
     PluginRequest, PluginRequestOptions,
 };
+
+/// Query metadata with one deadline for both process exit and stdout EOF.
+pub(crate) fn probe_plugin_info(path: &Path) -> Result<Option<PluginInfo>> {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    let mut command = Command::new(path);
+    command
+        .arg("--meta-plugin-info")
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        command.process_group(0);
+    }
+    let mut child = match command.spawn() {
+        Ok(child) => child,
+        Err(_) => return Ok(None),
+    };
+    let Some(stdout) = child.stdout.take() else {
+        let _ = child.kill();
+        let _ = child.wait();
+        return Ok(None);
+    };
+    let (sender, receiver) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let mut bytes = Vec::new();
+        // Plugin info is small; a plugin flooding stdout can't fill memory
+        let _ = sender.send(stdout.take(1 << 20).read_to_end(&mut bytes).map(|_| bytes));
+    });
+    // stdout ends once the plugin, and anything it started that holds it, is done
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    if let Ok(output) = receiver.recv_timeout(remaining) {
+        loop {
+            match child.try_wait() {
+                Ok(Some(status)) => {
+                    return Ok(output
+                        .ok()
+                        .filter(|_| status.success())
+                        .and_then(|bytes| serde_json::from_slice(&bytes).ok()))
+                }
+                Ok(None) if Instant::now() < deadline => {
+                    std::thread::sleep(Duration::from_millis(1))
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    return Err(e).with_context(|| {
+                        format!("Cannot wait for plugin {}; skipping", escape_path(path))
+                    })
+                }
+            }
+        }
+    }
+    // A wrapper may already have exited while its descendants hold stdout open.
+    // Kill its process group even when the wrapper itself has exited.
+    #[cfg(unix)]
+    if let Ok(pid) = i32::try_from(child.id()) {
+        // SAFETY: the child was started as leader of its own process group.
+        unsafe {
+            libc::kill(-pid, libc::SIGKILL);
+        }
+    }
+    // Elsewhere only the plugin itself is killed: a process it started that
+    // still holds stdout outlives it, but meta doesn't wait for that reader
+    let _ = child.kill();
+    let _ = child.wait();
+    anyhow::bail!(
+        "Plugin {} did not answer --meta-plugin-info within 5 seconds; skipping",
+        escape_path(path)
+    )
+}
+
+/// Print a plugin's output. A closed stdout (`meta ... | head`) ends meta
+/// quietly, as it does for command output.
+pub(crate) fn print_output(text: &str) -> Result<()> {
+    use std::io::Write;
+    std::io::stdout()
+        .lock()
+        .write_all(text.as_bytes())
+        .map_err(loop_lib::StdoutError)?;
+    Ok(())
+}
 
 /// A discovered subprocess plugin
 #[derive(Debug, Clone)]
@@ -45,24 +129,32 @@ impl SubprocessPluginManager {
     /// Discover and load all subprocess plugins
     ///
     /// Discovery order (first match wins):
-    /// 1. `.meta/plugins/` directories walking up from cwd (project-local)
-    /// 2. `~/.meta/plugins/` (global installed)
+    /// 1. `.meta/plugins/` of each of the workspace's meta directories, from
+    ///    the nearest one up (`meta_core::config::workspace_meta_dirs`)
+    /// 2. `meta_core::meta_dir()/plugins/` (global installed)
     /// 3. PATH (bundled/system plugins)
     pub fn discover_plugins(&mut self, verbose: bool) -> Result<()> {
         self.verbose = verbose;
         let mut visited = std::collections::HashSet::new();
 
-        // Search in .meta/plugins/ directories walking up from cwd (project-local)
-        let mut current_dir = std::env::current_dir()?;
-        loop {
-            let plugin_dir = current_dir.join(".meta").join("plugins");
-            if plugin_dir.is_dir() && visited.insert(resolved(&plugin_dir)) {
-                self.scan_directory(&plugin_dir)?;
-            }
-            if let Some(parent) = current_dir.parent() {
-                current_dir = parent.to_path_buf();
-            } else {
-                break;
+        // Project plugins: those of each meta directory from the nearest one
+        // up to its workspace's root, nearest first, independently of --config
+        let cwd = std::env::current_dir()?;
+        // A config meta can't use leaves no project plugins; the command
+        // itself reports it, and `--help` still prints
+        let nearest = meta_core::config::nearest_meta_dir(&cwd).unwrap_or_else(|e| {
+            eprintln!(
+                "Warning: {} Skipping project plugins.",
+                escape(&format!("{e:#}"))
+            );
+            None
+        });
+        if let Some(nearest) = nearest {
+            for dir in meta_core::config::workspace_meta_dirs(&nearest) {
+                let plugin_dir = dir.join(".meta/plugins");
+                if visited.insert(resolved(&plugin_dir)) {
+                    self.scan_directory(&plugin_dir)?;
+                }
             }
         }
 
@@ -70,7 +162,7 @@ impl SubprocessPluginManager {
         // no global plugins.
         if let Ok(meta_dir) = meta_core::meta_dir() {
             let global_plugins = meta_dir.join("plugins");
-            if global_plugins.is_dir() && visited.insert(resolved(&global_plugins)) {
+            if visited.insert(resolved(&global_plugins)) {
                 self.scan_directory(&global_plugins)?;
             }
         }
@@ -87,14 +179,44 @@ impl SubprocessPluginManager {
         Ok(())
     }
 
-    /// Scan a .meta-plugins directory for plugin executables
+    /// Scan a `.meta/plugins` directory for plugin executables
     fn scan_directory(&mut self, dir: &Path) -> Result<()> {
         if self.verbose {
             println!("Scanning for subprocess plugins in: {}", escape_path(dir));
         }
 
-        for entry in std::fs::read_dir(dir)? {
-            let entry = entry?;
+        let entries = match std::fs::read_dir(dir) {
+            Ok(entries) => entries,
+            // A legacy `.meta` config file in place of the `.meta/` folder means no plugins
+            Err(e)
+                if matches!(
+                    e.kind(),
+                    std::io::ErrorKind::NotFound | std::io::ErrorKind::NotADirectory
+                ) =>
+            {
+                return Ok(())
+            }
+            Err(e) => {
+                eprintln!(
+                    "Warning: Cannot read plugins directory {}: {}; skipping",
+                    escape_path(dir),
+                    escape(&e.to_string())
+                );
+                return Ok(());
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(entry) => entry,
+                Err(e) => {
+                    eprintln!(
+                        "Warning: Cannot read plugins directory {}: {}; skipping entry",
+                        escape_path(dir),
+                        escape(&e.to_string())
+                    );
+                    continue;
+                }
+            };
             let path = entry.path();
 
             // Look for executables named meta-*
@@ -133,46 +255,29 @@ impl SubprocessPluginManager {
             return Ok(());
         }
 
-        // Query plugin info
-        let output = Command::new(path)
-            .arg("--meta-plugin-info")
-            .stdout(Stdio::piped())
-            .stderr(Stdio::null())
-            .output();
-
-        match output {
-            Ok(output) if output.status.success() => {
-                // Try to parse as plugin info - silently skip if invalid JSON
-                // (e.g., meta-mcp is an MCP server, not a meta plugin)
-                let info: PluginInfo = match serde_json::from_slice(&output.stdout) {
-                    Ok(info) => info,
-                    Err(_) => return Ok(()), // Not a valid plugin, skip silently
-                };
-
-                if self.verbose {
-                    println!(
-                        "  Found plugin: {} v{} ({})",
-                        escape(&info.name),
-                        escape(&info.version),
-                        escape_path(path)
-                    );
-                }
-
-                // Don't override if already loaded (first one wins)
-                if !self.plugins.contains_key(&info.name) {
-                    self.plugins.insert(
-                        info.name.clone(),
-                        SubprocessPlugin {
-                            path: path.to_path_buf(),
-                            info,
-                        },
-                    );
-                }
+        let info = match probe_plugin_info(path) {
+            Ok(Some(info)) => info,
+            Ok(None) => return Ok(()),
+            Err(e) => {
+                eprintln!("Warning: {e}");
+                return Ok(());
             }
-            _ => {
-                // Not a valid plugin, ignore silently
-            }
+        };
+        if self.verbose {
+            println!(
+                "  Found plugin: {} v{} ({})",
+                escape(&info.name),
+                escape(&info.version),
+                escape_path(path)
+            );
         }
+        // Don't override if already loaded (first one wins).
+        self.plugins
+            .entry(info.name.clone())
+            .or_insert_with(|| SubprocessPlugin {
+                path: path.to_path_buf(),
+                info,
+            });
         Ok(())
     }
 
@@ -253,7 +358,8 @@ impl SubprocessPluginManager {
         if self.verbose {
             println!(
                 "Executing plugin {} for command '{}'",
-                plugin.info.name, request.command
+                escape(&plugin.info.name),
+                escape(&request.command)
             );
         }
 
@@ -265,10 +371,19 @@ impl SubprocessPluginManager {
             .spawn()
             .with_context(|| format!("Failed to execute plugin {}", escape_path(&plugin.path)))?;
 
-        // Send request to plugin's stdin
+        // Send request to plugin's stdin. A plugin may answer without
+        // reading it; then its output and exit status decide, not the pipe.
         if let Some(mut stdin) = child.stdin.take() {
             use std::io::Write;
-            stdin.write_all(request_json.as_bytes())?;
+            match stdin.write_all(request_json.as_bytes()) {
+                Err(e) if e.kind() == std::io::ErrorKind::BrokenPipe => {}
+                result => result.with_context(|| {
+                    format!(
+                        "Cannot send the request to plugin {}",
+                        escape_path(&plugin.path)
+                    )
+                })?,
+            }
         }
 
         let output = child.wait_with_output()?;
@@ -277,7 +392,7 @@ impl SubprocessPluginManager {
             // Plugin already printed its error to stderr. What it printed
             // before failing (say the worktrees it removed before a store
             // error) is shown too; then its exit code is propagated.
-            print!("{}", String::from_utf8_lossy(&output.stdout));
+            let _ = std::io::Write::write_all(&mut std::io::stdout(), &output.stdout);
             std::process::exit(output.status.code().unwrap_or(1));
         }
 
@@ -291,7 +406,7 @@ impl SubprocessPluginManager {
 
         // If stdout doesn't look like JSON, print it (legacy plugin output)
         if !stdout_str.trim().starts_with('{') {
-            print!("{stdout_str}");
+            print_output(&stdout_str)?;
             return Ok(true);
         }
 
@@ -307,11 +422,11 @@ impl SubprocessPluginManager {
             Err(e) if is_plan => anyhow::bail!(
                 "plugin {} sent an execution plan this meta cannot read ({e}); \
                  upgrade the plugin to match this meta",
-                plugin.path.display()
+                escape_path(&plugin.path)
             ),
             Err(_) => {
                 // Not a plan - print output as-is
-                print!("{stdout_str}");
+                print_output(&stdout_str)?;
                 Ok(true)
             }
         }
@@ -580,9 +695,10 @@ impl SubprocessPluginManager {
     fn generate_fallback_help(&self, plugin: &SubprocessPlugin) -> String {
         let info = &plugin.info;
         let mut help = String::new();
-        let name = &info.name;
-        let version = &info.version;
-        let description = info.description.as_deref().unwrap_or("Meta CLI plugin");
+        // Every value comes from the plugin: each stays on its line
+        let name = escape(&info.name);
+        let version = escape(&info.version);
+        let description = escape(info.description.as_deref().unwrap_or("Meta CLI plugin"));
 
         // Header
         help.push_str(&format!("meta-{name} v{version} - {description}\n\n"));
@@ -590,14 +706,15 @@ impl SubprocessPluginManager {
         // If plugin has structured help, use it
         if let Some(ref plugin_help) = info.help {
             help.push_str("USAGE:\n");
-            let usage = &plugin_help.usage;
+            let usage = escape(&plugin_help.usage);
             help.push_str(&format!("    {usage}\n\n"));
 
             // Use command_sections if present, otherwise fall back to flat commands
             if !plugin_help.command_sections.is_empty() {
                 for (section_title, commands) in &plugin_help.command_sections {
-                    help.push_str(&format!("{section_title}:\n"));
+                    help.push_str(&format!("{}:\n", escape(section_title)));
                     for (cmd, desc) in commands {
+                        let (cmd, desc) = (escape(cmd), escape(desc));
                         help.push_str(&format!("    {cmd:<16} {desc}\n"));
                     }
                     help.push('\n');
@@ -607,6 +724,7 @@ impl SubprocessPluginManager {
                 let mut cmds: Vec<_> = plugin_help.commands.iter().collect();
                 cmds.sort_by(|a, b| a.0.cmp(b.0));
                 for (cmd, desc) in cmds {
+                    let (cmd, desc) = (escape(cmd), escape(desc));
                     help.push_str(&format!("    {cmd:<16} {desc}\n"));
                 }
                 help.push('\n');
@@ -615,13 +733,13 @@ impl SubprocessPluginManager {
             if !plugin_help.examples.is_empty() {
                 help.push_str("EXAMPLES:\n");
                 for example in &plugin_help.examples {
-                    help.push_str(&format!("    {example}\n"));
+                    help.push_str(&format!("    {}\n", escape(example)));
                 }
                 help.push('\n');
             }
 
             if let Some(ref note) = plugin_help.note {
-                help.push_str(&format!("NOTE:\n    {note}\n"));
+                help.push_str(&format!("NOTE:\n    {}\n", escape(note)));
             }
         } else {
             // Basic fallback from command list
@@ -630,10 +748,10 @@ impl SubprocessPluginManager {
 
             if !info.commands.is_empty() {
                 help.push_str("COMMANDS:\n");
-                let prefix = format!("{name} ");
+                let prefix = format!("{} ", info.name);
                 for cmd in &info.commands {
                     // Strip "git " prefix for display
-                    let display_cmd = cmd.strip_prefix(&prefix).unwrap_or(cmd);
+                    let display_cmd = escape(cmd.strip_prefix(&prefix).unwrap_or(cmd));
                     help.push_str(&format!("    {display_cmd}\n"));
                 }
                 help.push('\n');

@@ -103,7 +103,7 @@ fn is_cache_valid(cached: &CachedContext, current_root: &PathBuf) -> bool {
 pub fn handle_context(json: bool, no_status: bool, no_cache: bool, verbose: bool) -> Result<()> {
     let cwd = std::env::current_dir().context("Failed to get current directory")?;
 
-    let (config_path, _format) = config::find_meta_config(&cwd, None)
+    let (config_path, _format) = config::find_meta_config(&cwd, None)?
         .ok_or_else(|| anyhow::anyhow!("Not a meta workspace (no .meta config found)"))?;
 
     let meta_dir = config_path
