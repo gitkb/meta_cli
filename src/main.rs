@@ -958,8 +958,18 @@ fn handle_command_dispatch(
                 .as_ref()
                 .map(|p| escape_path(p))
                 .unwrap_or_else(|| config::META_CONFIG_NAME.to_string());
-            eprintln!("Error: Could not find meta config file '{config_name}'");
-            eprintln!("Searched from {} up to root", escape_path(&current_dir));
+            let message = format!(
+                "Could not find meta config file '{config_name}'\nSearched from {} up to root",
+                escape_path(&current_dir)
+            );
+            // A JSON caller can tell a missing config from any other failure
+            if cli.json {
+                let error = serde_json::json!({
+                    "error": {"code": "config_not_found", "message": message}
+                });
+                println!("{error}");
+            }
+            eprintln!("Error: {message}");
             std::process::exit(1);
         }
     };
