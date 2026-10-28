@@ -127,18 +127,20 @@ fn not_held(
         .collect()
 }
 
-/// Whether a linked worktree's checkout (one whose `.git` is a file) is
-/// under `dir`. Plain clones (a `.git` directory) are not looked inside.
-pub fn holds_linked_checkout(dir: &Path) -> bool {
+/// Whether a checkout meta made for a set (a linked worktree with meta's
+/// record) is under `dir`, as in a set moved by hand. Other tools' worktrees
+/// have no record; plain clones (a `.git` directory, or a link to one) are
+/// not looked inside.
+pub fn holds_meta_checkout(dir: &Path) -> bool {
     let mut walk = walkdir::WalkDir::new(dir).follow_links(false).into_iter();
     while let Some(entry) = walk.next() {
         let Ok(entry) = entry else { continue };
         if !entry.file_type().is_dir() {
             continue;
         }
-        match std::fs::symlink_metadata(entry.path().join(".git")) {
-            Ok(meta) if meta.is_file() => return true,
+        match std::fs::metadata(entry.path().join(".git")) {
             Ok(meta) if meta.is_dir() => walk.skip_current_dir(),
+            Ok(_) if meta_core::config::recorded_project(entry.path()).is_some() => return true,
             _ => {}
         }
     }
