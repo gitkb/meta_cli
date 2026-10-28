@@ -799,12 +799,12 @@ fn handle_command_dispatch(
                 // A set lays its repos out as the workspace: a checkout's path
                 // in the set is its project's path, nested meta repos included.
                 // Only a filter reads the nested configs; the set's own copies
-                // win over the workspace's (see set_trees).
+                // win over the workspace's (see set_tree).
                 let filtered = cli.tag.is_some() || cli.include.is_some() || cli.exclude.is_some();
-                let (source_tree, tree) = if filtered {
-                    worktree::set_trees(&task_dir, &wt_paths, &meta_projects)?
+                let tree = if filtered {
+                    worktree::set_tree(&task_dir, &wt_paths, &meta_projects)?
                 } else {
-                    Default::default()
+                    Vec::new()
                 };
                 // Compared as directories: a project at a link in the set is
                 // the checkout where the link leads
@@ -812,9 +812,8 @@ fn handle_command_dispatch(
                     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
                 };
                 let project_map: std::collections::HashMap<PathBuf, ProjectInfo> =
-                    [&source_tree, &tree]
+                    config::build_project_map(&tree, &task_dir, "")
                         .into_iter()
-                        .flat_map(|tree| config::build_project_map(tree, &task_dir, ""))
                         .map(|(place, (_, info))| (real(&task_dir.join(place)), info))
                         .collect();
 
@@ -838,10 +837,7 @@ fn handle_command_dispatch(
 
                 // Selected by project name or by its path in the set
                 let wt_directories = select_repos(cli, wt_directories, &task_dir, || {
-                    let mut names =
-                        repo_filter::repo_names(&task_dir, &meta_projects, &source_tree);
-                    names.extend(repo_filter::repo_names(&task_dir, &meta_projects, &tree));
-                    names
+                    repo_filter::repo_names(&task_dir, &meta_projects, &tree)
                 })?;
 
                 if wt_directories.is_empty() {

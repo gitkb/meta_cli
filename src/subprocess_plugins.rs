@@ -358,7 +358,8 @@ impl SubprocessPluginManager {
         if self.verbose {
             println!(
                 "Executing plugin {} for command '{}'",
-                plugin.info.name, request.command
+                escape(&plugin.info.name),
+                escape(&request.command)
             );
         }
 

@@ -15,6 +15,7 @@
 //! - `branch:main AND modified_in:7d`
 
 use anyhow::{Context, Result};
+use meta_core::display::escape;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
@@ -86,7 +87,10 @@ impl Query {
     fn parse_condition(s: &str) -> Result<QueryCondition> {
         let parts: Vec<&str> = s.splitn(2, ':').collect();
         if parts.len() != 2 {
-            anyhow::bail!("Invalid condition format: '{s}'. Expected 'field:value'");
+            anyhow::bail!(
+                "Invalid condition format: '{}'. Expected 'field:value'",
+                escape(s)
+            );
         }
 
         let field = parts[0].trim().to_lowercase();
@@ -95,7 +99,7 @@ impl Query {
         match field.as_str() {
             "dirty" => {
                 let is_dirty = value.parse::<bool>()
-                    .with_context(|| format!("Invalid boolean value for dirty: '{value}'"))?;
+                    .with_context(|| format!("Invalid boolean value for dirty: '{}'", escape(value)))?;
                 Ok(QueryCondition::Dirty(is_dirty))
             }
             "branch" => Ok(QueryCondition::Branch(value.to_string())),
@@ -107,20 +111,20 @@ impl Query {
             "language" | "lang" => Ok(QueryCondition::Language(value.to_lowercase())),
             "has_unpushed" | "unpushed" => {
                 let has_unpushed = value.parse::<bool>()
-                    .with_context(|| format!("Invalid boolean value: '{value}'"))?;
+                    .with_context(|| format!("Invalid boolean value: '{}'", escape(value)))?;
                 Ok(QueryCondition::HasUnpushed(has_unpushed))
             }
             "ahead" | "ahead_of_remote" => {
                 let ahead = value.parse::<bool>()
-                    .with_context(|| format!("Invalid boolean value: '{value}'"))?;
+                    .with_context(|| format!("Invalid boolean value: '{}'", escape(value)))?;
                 Ok(QueryCondition::AheadOfRemote(ahead))
             }
             "behind" | "behind_remote" => {
                 let behind = value.parse::<bool>()
-                    .with_context(|| format!("Invalid boolean value: '{value}'"))?;
+                    .with_context(|| format!("Invalid boolean value: '{}'", escape(value)))?;
                 Ok(QueryCondition::BehindRemote(behind))
             }
-            _ => anyhow::bail!("Unknown query field: '{field}'. Valid fields: dirty, branch, tag, modified_in, language, has_unpushed, ahead, behind"),
+            _ => anyhow::bail!("Unknown query field: '{}'. Valid fields: dirty, branch, tag, modified_in, language, has_unpushed, ahead, behind", escape(&field)),
         }
     }
 }
@@ -132,25 +136,28 @@ fn parse_duration(s: &str) -> Result<Duration> {
     if s.ends_with('h') {
         let hours: u64 = s[..s.len() - 1]
             .parse()
-            .with_context(|| format!("Invalid hours value: '{s}'"))?;
+            .with_context(|| format!("Invalid hours value: '{}'", escape(&s)))?;
         Ok(Duration::from_secs(hours * 3600))
     } else if s.ends_with('d') {
         let days: u64 = s[..s.len() - 1]
             .parse()
-            .with_context(|| format!("Invalid days value: '{s}'"))?;
+            .with_context(|| format!("Invalid days value: '{}'", escape(&s)))?;
         Ok(Duration::from_secs(days * 86400))
     } else if s.ends_with('m') {
         let minutes: u64 = s[..s.len() - 1]
             .parse()
-            .with_context(|| format!("Invalid minutes value: '{s}'"))?;
+            .with_context(|| format!("Invalid minutes value: '{}'", escape(&s)))?;
         Ok(Duration::from_secs(minutes * 60))
     } else if s.ends_with('w') {
         let weeks: u64 = s[..s.len() - 1]
             .parse()
-            .with_context(|| format!("Invalid weeks value: '{s}'"))?;
+            .with_context(|| format!("Invalid weeks value: '{}'", escape(&s)))?;
         Ok(Duration::from_secs(weeks * 604800))
     } else {
-        anyhow::bail!("Invalid duration format: '{s}'. Use format like '24h', '7d', '30m', '2w'")
+        anyhow::bail!(
+            "Invalid duration format: '{}'. Use format like '24h', '7d', '30m', '2w'",
+            escape(&s)
+        )
     }
 }
 

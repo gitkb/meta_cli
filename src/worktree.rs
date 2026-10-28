@@ -6,7 +6,7 @@
 //! for worktree management commands.
 
 use anyhow::{Context, Result};
-use meta_core::display::{escape_lines, escape_path};
+use meta_core::display::{escape, escape_lines, escape_path};
 use serde::Serialize;
 use std::path::{Path, PathBuf};
 
@@ -85,28 +85,27 @@ pub fn set_config(
     }
 }
 
-/// The meta trees that describe the checkouts of the set at `set_dir`, whose
-/// config lists `projects`: the set's own nested configs, and those of the
-/// workspace the set was made from, for a nested meta repo the set doesn't
-/// hold (one skipped, say). The second is best effort: what neither tells
-/// about stays unselected. Returns (the workspace's, the set's).
-pub fn set_trees(
+/// The meta tree that describes the checkouts of the set at `set_dir`, whose
+/// config lists `projects`: the nested configs of the workspace the set was
+/// made from, for nested meta repos the set doesn't hold (one skipped, say),
+/// then the set's own, so a map built from it in order lets the set's win.
+/// The workspace's part is best effort: what neither tells about stays
+/// unselected.
+pub fn set_tree(
     set_dir: &Path,
     members: &[PathBuf],
     projects: &[meta_core::config::ProjectInfo],
-) -> Result<(
-    Vec<meta_core::config::MetaTreeNode>,
-    Vec<meta_core::config::MetaTreeNode>,
-)> {
+) -> Result<Vec<meta_core::config::MetaTreeNode>> {
     use meta_core::config;
     let own = config::walk_projects(set_dir, projects, None)?;
-    let made_from = members
+    let mut tree: Vec<_> = members
         .iter()
         .find_map(|member| config::recorded_project(member))
         .and_then(|dir| config::walk_projects(&dir, projects, None).ok())
         .map(|tree| not_held(tree, set_dir))
         .unwrap_or_default();
-    Ok((made_from, own))
+    tree.extend(own);
+    Ok(tree)
 }
 
 /// `nodes` without the projects of the nested meta repos whose config the
@@ -431,7 +430,9 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
     let dot_git_dir = gitdir_path
         .parent() // strip worktree name
         .and_then(|p| p.parent()) // strip "worktrees"
-        .ok_or_else(|| anyhow::anyhow!("Cannot derive source repo from gitdir: {gitdir}"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("Cannot derive source repo from gitdir: {}", escape(gitdir))
+        })?;
 
     // dot_git_dir is now the .git directory; parent is the repo root
     let repo_root = dot_git_dir.parent().ok_or_else(|| {
@@ -447,6 +448,32 @@ fn source_repo_from_gitfile(git_file: &Path) -> Result<PathBuf> {
 #[cfg(test)]
 mod recursive_tests {
     use super::*;
+
+    #[test]
+    fn the_sets_own_nested_config_wins_over_the_workspaces() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (workspace, set) = (tmp.path().join("ws"), tmp.path().join("set"));
+        let config = |dir: &Path, projects: &str| {
+            std::fs::create_dir_all(dir).unwrap();
+            std::fs::write(
+                dir.join(".meta.json"),
+                format!(r#"{{"projects": {{{projects}}}}}"#),
+            )
+            .unwrap();
+        };
+        config(&workspace, r#""parent": {"repo": "x", "meta": true}"#);
+        config(&workspace.join("parent"), r#""x": "x""#);
+        let (projects, _) =
+            meta_core::config::parse_meta_config(&workspace.join(".meta.json")).unwrap();
+        let tree = meta_core::config::walk_projects(&workspace, &projects, None).unwrap();
+
+        // the set doesn't hold parent: the workspace's config tells about x
+        std::fs::create_dir_all(&set).unwrap();
+        assert_eq!(not_held(tree.clone(), &set)[0].children.len(), 1);
+        // the set holds parent's config, which no longer lists x
+        config(&set.join("parent"), "");
+        assert!(not_held(tree, &set)[0].children.is_empty());
+    }
 
     /// Create a real committed repository and linked worktree in the fixture.
     fn member(root: &Path, alias: &str) {

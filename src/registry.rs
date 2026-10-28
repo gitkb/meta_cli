@@ -766,7 +766,7 @@ impl PluginInstaller {
 
         let download_url = self
             .get_platform_url(releases, &platform)
-            .with_context(|| format!("No release available for platform {platform}"))?;
+            .with_context(|| format!("No release available for platform {}", escape(&platform)))?;
 
         info!(
             "Downloading {} v{} for {}",

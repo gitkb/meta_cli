@@ -495,3 +495,24 @@ esac"#,
         assert!(text.contains("odd"), "{args:?}: {text}");
     }
 }
+
+#[test]
+fn verbose_dispatch_keeps_a_plugins_name_on_its_line() {
+    let f = Fixture::new(true);
+    script(
+        &f.data.join("plugins/meta-demo"),
+        r#"case "$1" in
+--meta-plugin-info) printf '%s\n' '{"name":"bad\u001b[2J\nFORGED","version":"1","commands":["demo run"]}' ;;
+*) exit 0 ;;
+esac"#,
+    );
+    let out = f.run(&["--verbose", "demo", "run"]);
+    let text =
+        String::from_utf8_lossy(&out.stdout).to_string() + &String::from_utf8_lossy(&out.stderr);
+    assert!(text.contains("Executing plugin bad"), "{text}");
+    assert!(!text.contains('\u{1b}'), "{text}");
+    assert!(
+        !text.lines().any(|line| line.starts_with("FORGED")),
+        "{text}"
+    );
+}
