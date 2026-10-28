@@ -104,7 +104,7 @@ fn set_origin(set_dir: &Path, members: &[PathBuf]) -> Result<Option<PathBuf>> {
         match &origin {
             Some(first) if *first != project => anyhow::bail!(
                 "The checkouts of worktree set {} name different workspaces ({} and {}); \
-                 meta can't tell which config describes them",
+                 meta can't tell which config describes them. Pass --primary to run in the workspace.",
                 escape_path(set_dir),
                 escape_path(first),
                 escape_path(&project)
@@ -224,11 +224,14 @@ pub fn holds_meta_checkout(dir: &Path) -> bool {
             Ok(_) => {
                 let meta_made =
                     meta_core::config::gitfile_target(entry.path()).is_none_or(|admin| {
+                        // only a record that is surely absent says "not meta's"
                         !admin.is_dir()
-                            || admin
-                                .join(meta_core::config::WORKTREE_RECORD_FILE)
-                                .symlink_metadata()
-                                .is_ok()
+                            || !matches!(
+                                admin
+                                    .join(meta_core::config::WORKTREE_RECORD_FILE)
+                                    .symlink_metadata(),
+                                Err(e) if e.kind() == std::io::ErrorKind::NotFound
+                            )
                     });
                 if meta_made {
                     return true;

@@ -1523,6 +1523,10 @@ fn check_and_warn_orphan() {
     };
 
     // Check if this meta repo is orphaned (not tracked by parent)
+    // A set's checkout is meta's own, not a repo its parent forgot to list
+    if config::set_source(&meta_dir).is_some() {
+        return;
+    }
     if let Some(warning) = config::check_orphan_status(&meta_dir) {
         eprintln!(
             "{}: This meta repo is not tracked by its parent.",
